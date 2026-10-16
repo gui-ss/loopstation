@@ -1,22 +1,28 @@
 #include "AudioSystem.h"
 #include "MainComponent.h"
+#include "InputFxShortcuts.h"
 #if defined(_MSC_VER) && defined(_DEBUG)
  #include <crtdbg.h>
 #endif
 #include <iostream>
 #include <stdexcept>
 #include <thread>
+#include <chrono>
 #include <array>
 #include <cmath>
 #include <limits>
 
 void runLoopTrackTests();
 void runRobotEffectTests();
+void runOscBotEffectTests();
 void runMusicalClockTests();
 void runTempoPanelTests();
 
 struct AudioSystemTestAccess
 {
+    static uint64_t consumedInput(const AudioSystem& audio) { return audio.consumedInputActivation; }
+    static bool oscEnabled(const AudioSystem& audio,int slot) { return (audio.inputOscBots[size_t(slot)].applied&1)!=0; }
+    static int sequenceNote(const AudioSystem& audio,int slot) { return audio.inputOscBots[size_t(slot)].soundingNote; }
     static MusicalClock::SyncBlock syncBlock(const AudioSystem& audio) { return audio.clock.syncBlock(); }
     static void serviceCommands(AudioSystem& audio, const float* const* inputs, int numInputs,
                                 float* const* outputs, int numOutputs)
@@ -962,6 +968,479 @@ void testInputRobotIntegration()
     std::cout << "PASS: INPUT ROBOT live-only monitoring, one wet path, pre-record FX/FX OFF, stored wet/dry, no playback reprocessing, overdub/Undo/TRACK FX, missing input/reconnect\n";
 }
 
+void testOscBotInputIntegration()
+{
+    using Command = LoopTrack::Command;
+    for (double rate : { 44100., 48000. })
+    {
+        FiveTracks f(rate);
+        OscBotParameters osc; osc.enabled = true; osc.attack = 0; osc.balance = 100; osc.note = 48;
+        f.audio.setInputOscBot(2, osc);
+        for (int n = 0; n < 4096; ++n)
+        {
+            f.inputL[size_t(n)] = .2f * std::sin(juce::MathConstants<float>::twoPi * 75.f * n / 4096.f);
+            f.inputR[size_t(n)] = 0;
+        }
+        const auto dryCapture = f.inputL;
+        f.render(8192);
+        for (float x : f.left) require(x == 0, "OSC BOT enabled monitoring itself");
+        f.audio.setMonitoringEnabled(true); f.audio.setMonitorVolume(.25f); f.render(8192);
+        double delta = 0, energy = 0;
+        for (int n = 512; n < 3800; ++n)
+        { delta += std::abs(f.left[size_t(n)] - .25f * dryCapture[size_t(n)]); energy += std::abs(f.left[size_t(n)]); }
+        require(delta > 5 && energy > 1, "OSC BOT not live without a loop");
+        for (int i = 0; i < 5; ++i) require(!f.audio.trackSnapshot(i).hasPhrase(), "OSC BOT created a loop");
+        f.audio.setTrackFxEnabled(1, false); f.render(4096);
+        f.command(0, Command::primary); f.command(1, Command::primary); f.render(4096);
+        const auto wetCapture = f.left;
+        f.command(0, Command::primary); f.command(1, Command::primary); f.stopAll();
+        f.audio.setMonitoringEnabled(false); osc.enabled = false; f.audio.setInputOscBot(2, osc); f.mic(0);
+        f.command(0, Command::primary); f.render(8192);
+        for (int n = 512; n < 3800; ++n)
+            require(std::abs(f.left[size_t(n)] - 4 * wetCapture[size_t(n)]) < 1.e-5f && f.right[size_t(n)] == 0,
+                "OSC BOT wet recording not retained with effect OFF / duplicate monitor path");
+        // Add processed input, complete the overdub, then restore the recorded synth.
+        osc.enabled = true; osc.note = 60; f.audio.setInputOscBot(2, osc);
+        f.mic(.1f); f.command(0, Command::primary); f.render(8192); f.command(0, Command::primary);
+        f.audio.selectTrack(0); require(f.audio.undoSelectedTrack(), "OSC BOT overdub Undo rejected");
+        f.render(0); f.stopAll(); f.mic(0);
+        osc.enabled = false; f.audio.setInputOscBot(2, osc);
+        f.command(0, Command::primary); f.render(8192);
+        for (int n = 512; n < 3800; ++n)
+            require(std::abs(f.left[size_t(n)] - 4 * wetCapture[size_t(n)]) < 1.e-5f, "OSC BOT overdub/Undo changed original");
+        f.stopAll(); f.command(1, Command::primary); f.render(8192);
+        for (int n = 512; n < 3800; ++n)
+            require(std::abs(f.left[size_t(n)] - dryCapture[size_t(n)]) < 1.e-5f, "OSC BOT ignored per-track FX OFF");
+        f.stopAll(); f.inputL = dryCapture; f.inputR.fill(0);
+        f.audio.setMonitoringEnabled(true); f.render(4096);
+        for (int n = 1500; n < 3800; ++n)
+            require(f.left[size_t(n)] == .25f * dryCapture[size_t(n)], "OSC BOT bypass changed dry monitor");
+        osc.enabled = true; f.audio.setInputOscBot(2, osc); f.render(8192);
+        f.render(4096, 0);
+        for (float x : f.left) require(x == 0, "OSC BOT retained oscillator without input device");
+        f.audio.selectDevices("Mic 2", "Output 2");
+        require(!f.audio.isMonitoringEnabled() && f.audio.trackSnapshot(0).hasPhrase(), "OSC BOT reconnect lost settings/loop");
+    }
+    std::cout << "PASS: OSC BOT live monitoring, wet/dry capture, playback OFF, no double processing, overdub/Undo, stereo, missing input and reconnect at 44.1/48 kHz\n";
+}
+
+
+
+void testInputFxShortcuts()
+{
+    FiveTracks f;MainComponent panel(f.audio);TopPanelComponent* top=nullptr;
+    for(auto* c:panel.getChildren()) if(auto* t=dynamic_cast<TopPanelComponent*>(c)) top=t;
+    MemoryDisplay* display=nullptr;juce::Button *edit=nullptr,*exit=nullptr,*next=nullptr;
+    std::array<juce::Button*,4> slots{};std::array<ParameterKnob*,4> knobs{};
+    for(auto* c:top->getChildren())
+    {
+        if(auto* d=dynamic_cast<MemoryDisplay*>(c)) display=d;
+        if(auto* b=dynamic_cast<juce::Button*>(c))
+        {
+            if(b->getTitle()=="INPUT FX EDIT") edit=b;
+            if(b->getButtonText()=="EXIT") exit=b;
+            if(b->getButtonText()=="Next") next=b;
+            for(int i=0;i<4;++i) if(b->getTitle()=="INPUT FX "+juce::String::charToString(char('A'+i))) slots[size_t(i)]=b;
+        }
+        if(auto* k=dynamic_cast<ParameterKnob*>(c))
+            for(int i=0;i<4;++i) if(k->getName()=="Parameter knob "+juce::String(i+1)) knobs[size_t(i)]=k;
+    }
+    require(display&&slots[3]&&knobs[3]&&edit&&next&&exit,"shortcut UI controls");
+    edit->onClick();
+    for(int i=0;i<4;++i) {slots[size_t(i)]->onClick();knobs[0]->setValue(5,juce::sendNotificationSync);}
+    exit->onClick();
+    InputFxShortcuts keys; keys.onPress=[&](int index){panel.inputFxShortcut(index);};
+    const auto press=[&](int index){require(keys.keyPressed(juce::KeyPress(InputFxShortcuts::codes[size_t(index)]),knobs[0],true),"shortcut not handled");};
+    const auto mask=[&]{unsigned m=0;for(int i=0;i<4;++i)if(display->inputEnabled(i))m|=1u<<i;return m;};
+    for(int i=0;i<4;++i)
+    {
+        keys.updateDownKeys(0);press(i);f.render(1);
+        require(mask()==(1u<<i)&&slots[size_t(i)]->getToggleState()&&AudioSystemTestAccess::oscEnabled(f.audio,i),"F6-F9 wrong slot/gate/LED");
+        for(int repeat=0;repeat<5;++repeat) press(i);
+        require(mask()==(1u<<i),"auto-repeat toggled effect");
+        keys.updateDownKeys(0);press(i);f.render(1024);
+        require(mask()==0&&!AudioSystemTestAccess::oscEnabled(f.audio,i),"individual OFF failed");
+    }
+    keys.updateDownKeys(0);press(4);f.render(1);
+    require(mask()==3&&(AudioSystemTestAccess::consumedInput(f.audio)&15)==3,"F10 OFF/OFF did not commit BOTH");
+    keys.updateDownKeys(0);press(4);f.render(1);require(mask()==0,"F10 ON/ON did not disable BOTH");
+    keys.updateDownKeys(0);press(0);keys.updateDownKeys(0);press(4);f.render(1);require(mask()==3,"F10 partial activation failed");
+    // The physical mouse path then keyboard operate on the same display model.
+    slots[0]->setToggleState(false,juce::dontSendNotification);slots[0]->onClick();require(mask()==2,"mouse and keys diverged");
+    keys.updateDownKeys(0);press(0);require(mask()==3,"keyboard after mouse diverged");
+    juce::TextEditor text; keys.updateDownKeys(0);
+    require(!keys.keyPressed(juce::KeyPress(juce::KeyPress::F10Key),&text,true)&&mask()==3,"typing intercepted");
+    keys.updateDownKeys(0);require(!keys.keyPressed(juce::KeyPress(juce::KeyPress::F10Key),nullptr,false)&&mask()==3,"inactive shortcut");
+    require(!keys.keyPressed(juce::KeyPress(juce::KeyPress::F5Key),nullptr,true),"F5 conflict");
+    for(int code:{'L','Q','Z'}) require(!keys.keyPressed(juce::KeyPress(code),nullptr,true),"existing keyboard conflict");
+    require(!keys.keyPressed(juce::KeyPress(juce::KeyPress::F6Key,juce::ModifierKeys::ctrlModifier,0),nullptr,true),"modified F6 consumed");
+    keys.focusChanged(16);press(4);require(mask()==3,"held key on focus return retriggered");
+    keys.updateDownKeys(0);press(4);require(mask()==0,"focus-release recovery failed");
+    keys.updateDownKeys(0);press(2);keys.updateDownKeys(0);press(3);
+    keys.updateDownKeys(0);press(4);require(mask()==15,"F10 changed C/D while enabling A/B");
+    keys.updateDownKeys(0);press(4);require(mask()==12,"F10 changed C/D while disabling A/B");
+    keys.updateDownKeys(0);press(2);keys.updateDownKeys(0);press(3);
+    // Editing retains physical A-D semantics: select a slot without toggling it.
+    edit->onClick();keys.updateDownKeys(0);press(1);
+    require(display->selectedInputSlot()==1&&mask()==0,"editor shortcut not same as physical button");
+    next->onClick();next->onClick();next->onClick();knobs[2]->setValue(0,juce::sendNotificationSync);exit->onClick();
+    keys.updateDownKeys(0);press(0);keys.updateDownKeys(0);press(1);require(mask()==2,"SINGLE restriction lost");
+    f.render(1);const auto before=AudioSystemTestAccess::consumedInput(f.audio);keys.updateDownKeys(0);press(4);f.render(1);
+    require(mask()==2&&!display->inputMulti(),"F10 silently changed SINGLE");
+    require((AudioSystemTestAccess::consumedInput(f.audio)>>16)==(before>>16),"SINGLE submitted group restart");
+    std::cout<<"PASS: F6-F9/F10 local dispatch, auto-repeat, editable text/focus/modifiers, mouse parity, SINGLE/MULTI, editor selection; F5/L/Q/Undo keys unclaimed\n";
+}
+
+void testInputFxGroupAudio()
+{
+    const int a[]={60,58,61,65,63,65,68,67,70},b[]={80,79,82,80,82,85};
+    for(bool sync:{false,true}) for(bool retrig:{false,true}) for(bool playback:{false,true})
+    {
+        FiveTracks f;f.audio.setBpm(165);f.mic(.15f);
+        if(playback)
+        { f.command(0,LoopTrack::Command::primary);f.render(220000);f.command(0,LoopTrack::Command::primary);f.render(150000); }
+        OscBotParameters osc;osc.enabled=true;osc.balance=100;
+        f.audio.setInputActivation(0,0,3,false);f.render(1);
+        // Simulate preemption between the two legacy parameter setters: gates
+        // MUST remain both off until the single group publication is consumed.
+        f.audio.setInputOscBot(0,osc);f.render(1);
+        require(!AudioSystemTestAccess::oscEnabled(f.audio,0)&&!AudioSystemTestAccess::oscEnabled(f.audio,1),"torn gate before group commit A");
+        f.audio.setInputOscBot(1,osc);f.render(1);
+        require(!AudioSystemTestAccess::oscEnabled(f.audio,0)&&!AudioSystemTestAccess::oscEnabled(f.audio,1),"torn gate before group commit B");
+        for(int slot=0;slot<2;++slot)
+        {
+            FxSequenceParameters seq;seq.enabled=true;seq.sync=sync;seq.retrig=retrig;seq.rate=102;seq.maximum=slot==0?9:6;
+            for(int n=0;n<seq.maximum;++n) seq.notes[size_t(n)]=slot==0?a[n]:b[n];
+            f.audio.setInputSequence(slot,seq);
+        }
+        f.audio.setInputActivation(1,0,3,false);f.render(7500); // A already running.
+        const double clockBefore=f.audio.musicalPosition().beats;
+        f.audio.setInputActivation(3,0,3,true);f.render(1);
+        require(AudioSystemTestAccess::oscEnabled(f.audio,0)&&AudioSystemTestAccess::oscEnabled(f.audio,1),"group did not enable on same boundary");
+        const int alignedStep=sync && playback ? 1 : 0;
+        require(AudioSystemTestAccess::sequenceNote(f.audio,0)==a[alignedStep]&&AudioSystemTestAccess::sequenceNote(f.audio,1)==b[alignedStep],"group missed VAL1/phrase-aligned step");
+        require(std::abs(f.audio.musicalPosition().beats-clockBefore-165./(60*48000))<1.e-9,"group reset MusicalClock");
+        f.audio.setInputActivation(0,0,3,false);f.render(1024);
+        require(!AudioSystemTestAccess::oscEnabled(f.audio,0)&&!AudioSystemTestAccess::oscEnabled(f.audio,1),"group OFF not coherent");
+        for(unsigned initial:{2u,0u})
+        {
+            f.audio.setInputActivation(initial,0,3,false);f.render(1);
+            f.audio.setInputActivation(3,0,3,true);f.render(1);
+            require(AudioSystemTestAccess::sequenceNote(f.audio,0)==a[alignedStep]&&AudioSystemTestAccess::sequenceNote(f.audio,1)==b[alignedStep],"B-only/OFF-OFF start not aligned");
+        }
+    }
+    // Full independent 9/6-step patterns after an explicit group start, no loop.
+    for(double rate:{44100.,48000.})
+    {
+        FiveTracks f(rate);f.audio.setBpm(165);f.mic(.1f);
+        OscBotParameters osc;osc.enabled=true;osc.balance=100;
+        for(int slot=0;slot<2;++slot)
+        {
+            f.audio.setInputOscBot(slot,osc);
+            FxSequenceParameters seq;seq.enabled=true;seq.retrig=true;seq.rate=102;seq.maximum=slot==0?9:6;
+            for(int n=0;n<seq.maximum;++n)seq.notes[size_t(n)]=slot==0?a[n]:b[n];
+            f.audio.setInputSequence(slot,seq);
+        }
+        f.audio.setInputActivation(1,0,3,false);f.render(11001);
+        f.audio.setInputActivation(3,0,3,true);
+        const int total=int(std::ceil(rate*60/165*8*10));
+        for(int position=0;position<total;)
+        {
+            const int frames=std::min(4096,total-position);f.render(frames);position+=frames;
+            const int step=int(std::floor((position-1)*165./(rate*60*8)+1.e-8));
+            require(AudioSystemTestAccess::sequenceNote(f.audio,0)==a[step%9]&&AudioSystemTestAccess::sequenceNote(f.audio,1)==b[step%6],"group patterns drifted/lost independent MAX");
+        }
+        f.audio.setBpm(140);f.render(1000);
+        const int afterBpm=int(std::floor((total*165./(rate*60)+999*140./(rate*60))/8+1.e-8));
+        require(AudioSystemTestAccess::sequenceNote(f.audio,0)==a[afterBpm%9]&&AudioSystemTestAccess::sequenceNote(f.audio,1)==b[afterBpm%6],"group BPM edit broke common step grid");
+        // Latest requested state wins when several UI operations precede a block.
+        f.audio.setInputActivation(0,0,3,false);f.audio.setInputActivation(3,0,3,true);f.audio.setInputActivation(0,0,3,false);f.render(1);
+        require(!AudioSystemTestAccess::oscEnabled(f.audio,0)&&!AudioSystemTestAccess::oscEnabled(f.audio,1),"stale group command resurrected effects");
+    }
+    std::cout<<"PASS: one atomic group gate/restart, partial-active alignment, SYNC/RETRIG combinations with/without loops, 165 BPM MAX9/6 at 44.1/48 kHz and unchanged clock\n";
+}
+
+void testFxSequenceIntegration()
+{
+    using C=LoopTrack::Command;
+    const auto setup=[](FiveTracks& f,int mask)
+    {
+        f.audio.setBpm(165); f.mic(.15f);
+        f.audio.setMonitoringEnabled(true); f.audio.setMonitorVolume(.25f);
+        for(int slot=0;slot<2;++slot)
+        {
+            OscBotParameters osc; osc.enabled=(mask&(1<<slot))!=0; osc.balance=100;osc.note=slot==0?36:72;
+            FxSequenceParameters seq; seq.enabled=true;seq.rate=102;seq.maximum=slot==0?9:6;
+            const int a[]={60,58,61,65,63,65,68,67,70}, b[]={80,79,82,80,82,85};
+            for(int i=0;i<seq.maximum;++i) seq.notes[size_t(i)]=slot==0?a[i]:b[i];
+            f.audio.setInputSequence(slot,seq); f.audio.setInputOscBot(slot,osc);
+        }
+    };
+    std::array<std::array<float,4096>,3> signals;
+    for(int mask=1;mask<=3;++mask)
+    { FiveTracks f; setup(f,mask); f.render(32768); signals[size_t(mask-1)]=f.left; }
+    double energyA=0,energyB=0,difference=0;
+    for(size_t i=0;i<4096;++i)
+    {
+        energyA+=signals[0][i]*signals[0][i]; energyB+=signals[1][i]*signals[1][i];
+        difference+=std::abs(signals[0][i]-signals[1][i]);
+        require(std::abs(signals[2][i]-.5f*(signals[0][i]+signals[1][i]))<1.e-6f,
+                "MULTI erased a voice or duplicated dry monitor");
+    }
+    require(energyA>.01 && energyB>.01 && difference>1,"A/B isolated sequences not audible/distinct");
+    FiveTracks f; setup(f,3); f.render(8192);
+    // Faster steps exercise actual note changes within the recorded block.
+    for(int slot=0;slot<2;++slot)
+    { FxSequenceParameters seq;seq.enabled=true;seq.rate=108;seq.maximum=2;seq.notes[0]=60+12*slot;seq.notes[1]=65+12*slot;f.audio.setInputSequence(slot,seq); }
+    for(int i=0;i<5;++i) f.command(i,C::primary);
+    f.render(4096);const auto captured=f.left;
+    for(int i=0;i<5;++i) f.command(i,C::primary);
+    f.stopAll();f.audio.setMonitoringEnabled(false); f.mic(0);
+    for(int slot=0;slot<2;++slot) f.audio.setInputOscBot(slot,{});
+    for(int track=0;track<5;++track)
+    {
+        f.command(track,C::primary);f.render(8192);
+        for(size_t i=512;i<3800;++i)
+            require(std::abs(f.left[i]-4*captured[i])<1.e-5f,"five-track sequence capture/playback OFF mismatch");
+        f.command(track,C::stop);f.render(512);
+    }
+    std::cout<<"PASS: sequence A/B isolated and convex MULTI audio; all five tracks capture generated notes and replay with INPUT FX OFF\n";
+}
+
+
+void testSequenceSyncTransport()
+{
+    using C=LoopTrack::Command;
+    for(bool quantized:{false,true})
+    {
+        FiveTracks f;f.mic(.15f);f.audio.setQuantizeEnabled(quantized);
+        OscBotParameters osc;osc.enabled=true;osc.balance=100;f.audio.setInputOscBot(0,osc);
+        FxSequenceParameters seq;seq.enabled=true;seq.sync=true;seq.rate=108;seq.maximum=3;
+        seq.notes[0]=60;seq.notes[1]=64;seq.notes[2]=67;f.audio.setInputSequence(0,seq);
+        f.command(0,C::primary);f.render(4096);f.command(0,C::primary);
+        const int length=quantized?96000:4096;
+        if(quantized) f.render(length-4096);
+        require(f.audio.trackSnapshot(0).state==LoopTrack::State::playing,"sequence changed REC completion");
+        f.render(1);require(AudioSystemTestAccess::sequenceNote(f.audio,0)==60,"SYNC missed first playback sample");
+        f.render(3000);require(AudioSystemTestAccess::sequenceNote(f.audio,0)==64,"SYNC did not advance");
+        f.render(length-3001);f.render(1);
+        require(AudioSystemTestAccess::sequenceNote(f.audio,0)==60,"SYNC missed sample-exact phrase wrap");
+        f.command(0,C::stop);f.command(0,C::primary);f.render(1);
+        require(AudioSystemTestAccess::sequenceNote(f.audio,0)==60,"SYNC missed STOP/resume");
+        seq.sync=false;seq.retrig=true;f.audio.setInputSequence(0,seq);f.render(3100);
+        osc.enabled=false;f.audio.setInputOscBot(0,osc);f.render(100);
+        osc.enabled=true;f.audio.setInputOscBot(0,osc);f.render(1);
+        require(AudioSystemTestAccess::sequenceNote(f.audio,0)==64,"RETRIG failed phrase-position alignment");
+    }
+    // LOOP SYNC delayed playback also cues on its scheduled sample.
+    FiveTracks f(48000,240000);f.mic(.1f);f.audio.setAllLoopSync(true);
+    OscBotParameters osc;osc.enabled=true;f.audio.setInputOscBot(0,osc);
+    FxSequenceParameters seq;seq.enabled=true;seq.sync=true;seq.rate=108;seq.maximum=2;seq.notes[0]=60;seq.notes[1]=72;
+    f.audio.setInputSequence(0,seq);f.command(0,C::primary);f.render(untilSyncBar(f));
+    f.render(4096);f.command(0,C::primary);f.render(96000-4096);f.render(1);
+    require(f.audio.trackSnapshot(0).state==LoopTrack::State::playing && AudioSystemTestAccess::sequenceNote(f.audio,0)==60,
+            "sequence LOOP SYNC REC->PLAY alignment");
+    std::cout<<"PASS: sequence SYNC sample-exact free/quantized/LOOP SYNC playback/wrap/resume and RETRIG alignment\n";
+}
+
+void testFxSequencePanel()
+{
+    FiveTracks f;MainComponent panel(f.audio);TopPanelComponent* top=nullptr;
+    for(auto* c:panel.getChildren()) if(auto* t=dynamic_cast<TopPanelComponent*>(c)) top=t;
+    juce::Button *edit=nullptr,*exit=nullptr,*next=nullptr;
+    std::array<juce::Button*,4> slots{};std::array<ParameterKnob*,4> knobs{};MemoryDisplay* display=nullptr;
+    for(auto* c:top->getChildren())
+    {
+        if(auto* b=dynamic_cast<juce::Button*>(c))
+        {
+            if(b->getTitle()=="INPUT FX EDIT") edit=b;
+            if(b->getButtonText()=="EXIT") exit=b;
+            if(b->getButtonText()=="Next") next=b;
+            for(int i=0;i<4;++i) if(b->getTitle()=="INPUT FX "+juce::String::charToString(char('A'+i))) slots[size_t(i)]=b;
+        }
+        if(auto* k=dynamic_cast<ParameterKnob*>(c))
+            for(int i=0;i<4;++i) if(k->getName()=="Parameter knob "+juce::String(i+1)) knobs[size_t(i)]=k;
+        if(auto* d=dynamic_cast<MemoryDisplay*>(c)) display=d;
+    }
+    require(edit&&exit&&next&&display&&slots[3]&&knobs[3],"sequence panel controls");
+    edit->onClick();
+    for(int slot=0;slot<2;++slot)
+    {
+        slots[size_t(slot)]->onClick();knobs[0]->setValue(5,juce::sendNotificationSync);
+        next->onClick();knobs[2]->setValue(100,juce::sendNotificationSync);next->onClick();
+        knobs[0]->setValue(1,juce::sendNotificationSync);
+        require(!knobs[3]->isEnabled() && display->getEditorField(3).text=="NOTE","TARGET should be fixed NOTE");
+        next->onClick();knobs[0]->setValue(102,juce::sendNotificationSync);knobs[1]->setValue(slot==0?9:6,juce::sendNotificationSync);
+        require(display->getEditorField(2).text=="MULTI","MULTI not exposed");
+        const int a[]={60,58,61,65,63,65,68,67,70},b[]={80,79,82,80,82,85};
+        const int count=slot==0?9:6;
+        for(int i=0;i<count;++i)
+        { if(i%4==0) next->onClick();knobs[size_t(i%4)]->setValue(slot==0?a[i]:b[i],juce::sendNotificationSync); }
+        const auto q=display->inputSequence(slot);
+        require(q.enabled&&q.rate==102&&q.maximum==count&&q.notes[size_t(count-1)]==(slot==0?70:85),"LCD sequence edits lost");
+    }
+    exit->onClick();
+    for(int slot=0;slot<2;++slot) {slots[size_t(slot)]->setToggleState(true,juce::dontSendNotification);slots[size_t(slot)]->onClick();}
+    require(slots[0]->getToggleState()&&slots[1]->getToggleState(),"MULTI buttons mutually exclusive");
+    f.mic(.15f);f.audio.setMonitoringEnabled(true);f.audio.setMonitorVolume(.25f);f.render(8192);
+    double difference=0;for(float x:f.left) difference+=std::abs(x-.0375f);
+    require(difference>5,"LCD sequence not wired to live engine");
+    edit->onClick();slots[0]->onClick();next->onClick();next->onClick();next->onClick();
+    knobs[2]->setValue(0,juce::sendNotificationSync);
+    require(slots[0]->getToggleState()&&!slots[1]->getToggleState(),"SINGLE did not enforce one active effect");
+    knobs[2]->setValue(1,juce::sendNotificationSync);
+    next->onClick();require(display->getEditorField(0).value==60&&display->inputSequence(1).notes[0]==80,"SINGLE/MULTI lost sequence");
+    auto file=juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("mk2-fx-sequence.png");
+    juce::FileOutputStream out(file);out.setPosition(0);out.truncate();juce::PNGImageFormat png;
+    require(png.writeImageToStream(display->createComponentSnapshot(display->getLocalBounds(),true,4),out),"sequence LCD render");
+    exit->onClick();require(!display->isInputEditing(),"sequence EXIT");
+    std::cout<<"PASS: LCD sequence pages/encoders/slots/SINGLE-MULTI/EXIT reach production DSP\n";
+}
+
+void testOscBotPanel()
+{
+    FiveTracks f; MainComponent panel(f.audio);
+    TopPanelComponent* top = nullptr;
+    for (auto* child : panel.getChildren()) if (auto* t = dynamic_cast<TopPanelComponent*>(child)) top = t;
+    juce::Button *edit = nullptr, *slotB = nullptr, *slotC = nullptr, *exit = nullptr, *next = nullptr, *back = nullptr;
+    MemoryDisplay* display = nullptr;
+    std::array<ParameterKnob*, 4> knobs {};
+    for (auto* child : top->getChildren())
+    {
+        if (auto* b = dynamic_cast<juce::Button*>(child))
+        {
+            if (b->getTitle() == "INPUT FX EDIT") edit = b;
+            if (b->getTitle() == "INPUT FX B") slotB = b;
+            if (b->getTitle() == "INPUT FX C") slotC = b;
+            if (b->getButtonText() == "EXIT") exit = b;
+            if (b->getButtonText() == "Next") next = b;
+            if (b->getButtonText() == "Previous") back = b;
+        }
+        if (auto* d = dynamic_cast<MemoryDisplay*>(child)) display = d;
+        if (auto* k = dynamic_cast<ParameterKnob*>(child))
+            for (int i = 0; i < 4; ++i) if (k->getName() == "Parameter knob " + juce::String(i + 1)) knobs[size_t(i)] = k;
+    }
+    require(edit && slotB && slotC && exit && next && back && display && knobs[3], "OSC BOT panel controls missing");
+    edit->onClick(); slotB->onClick(); knobs[0]->setValue(4, juce::sendNotificationSync);
+    knobs[1]->setValue(7, juce::sendNotificationSync); knobs[2]->setValue(-23, juce::sendNotificationSync);
+    slotC->onClick(); knobs[0]->setValue(5, juce::sendNotificationSync);
+    require(display->getEditorField(1).text == "SAW" && knobs[2]->getValue() == 0 && knobs[3]->getValue() == 50,
+            "OSC BOT panel defaults incorrect");
+    const auto screenshot = [&](const char* name)
+    {
+        auto file = juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile(name);
+        juce::FileOutputStream stream(file); stream.setPosition(0); stream.truncate();
+        juce::PNGImageFormat png;
+        require(png.writeImageToStream(display->createComponentSnapshot(display->getLocalBounds(), true, 4), stream), "OSC BOT LCD render failed");
+    };
+    knobs[1]->setValue(1, juce::sendNotificationSync); screenshot("mk2-osc-bot-page1.png");
+    knobs[3]->setValue(0, juce::sendNotificationSync); next->onClick();
+    require(display->getEditorField(0).text == "C2" && knobs[0]->getMinimum() == 24 && knobs[0]->getMaximum() == 127
+            && knobs[1]->getMinimum() == -50 && knobs[2]->getValue() == 50, "OSC BOT page two ranges");
+    knobs[0]->setValue(48, juce::sendNotificationSync);
+    knobs[1]->setValue(-50, juce::sendNotificationSync);
+    knobs[2]->setValue(100, juce::sendNotificationSync);
+    require(display->getEditorField(2).value == 100 && display->getEditorField(2).text == "100",
+            "OSC BOT BALANCE encoder did not reach 100");
+    screenshot("mk2-osc-bot-page2.png");
+    exit->onClick(); slotC->setToggleState(true, juce::dontSendNotification); slotC->onClick();
+    f.audio.setMonitoringEnabled(true); f.audio.setMonitorVolume(.25f); f.mic(.1f); f.render(8192);
+    float delta = 0;
+    for (int n = 1000; n < 3800; ++n) delta += std::abs(f.left[size_t(n)] - .025f);
+    require(delta > 5, "OSC BOT panel not connected to DSP");
+    edit->onClick(); slotC->onClick(); next->onClick();
+    require(slotC->getToggleState() && display->getEditorField(0).value == 48 && display->getEditorField(1).value == -50,
+            "OSC BOT editor toggled slot/lost values");
+    // The generic mouse-wheel encoder also adjusts the full semitone range.
+    const auto event = juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(), {20,20},
+        juce::ModifierKeys(), 1, 0, 0, 0, 0, knobs[0], knobs[0], juce::Time::getCurrentTime(),
+        {20,20}, juce::Time::getCurrentTime(), 1, false);
+    juce::MouseWheelDetails wheel {}; wheel.deltaY = .1f; knobs[0]->mouseWheelMove(event, wheel);
+    require(display->getEditorField(0).value > 48, "OSC BOT NOTE wheel ignored");
+    back->onClick(); knobs[0]->setValue(2, juce::sendNotificationSync); f.render(4096);
+    for (int n = 1500; n < 3800; ++n) require(f.left[size_t(n)] == .025f, "OSC BOT remained active after selecting visual HPF");
+    slotB->onClick();
+    require(display->getEditorField(0).text == "ROBOT" && display->getEditorField(1).value == 7
+            && display->getEditorField(2).value == -23, "OSC BOT destroyed ROBOT in B");
+    slotC->onClick(); knobs[0]->setValue(5, juce::sendNotificationSync);
+    exit->onClick(); slotC->setToggleState(false, juce::dontSendNotification); slotC->onClick(); f.render(4096);
+    for (int n = 1500; n < 3800; ++n) require(f.left[size_t(n)] == .025f, "OSC BOT physical OFF not dry");
+    std::cout << "PASS: OSC BOT catalog/two LCD pages/encoders/wheel/ON-OFF/EXIT to DSP; ROBOT B preserved\n";
+}
+
+void testOscBotCallbackBudget()
+{
+    for (double rate : { 44100., 48000. })
+    {
+        FiveTracks f(rate);
+        for (int n = 0; n < 4096; ++n)
+        { f.inputL[size_t(n)] = .08f * std::sin(n * .1f); f.inputR[size_t(n)] = .06f * std::sin(n * .13f); }
+        f.playAll(); f.render(4096); f.playAll();
+        TrackFxParameters effects; effects.enabled = true; effects.distortionEnabled = true;
+        f.audio.setTrackFxInsert(0, 0); f.audio.setTrackFxInsert(2, 0); f.audio.setTrackEffects(effects);
+        f.audio.setInputRobot(1, { true, 0, 0, 2 });
+        f.audio.setMonitoringEnabled(true);
+        OscBotParameters p; p.enabled = true; p.osc = 2; p.note = 24; p.balance = 100;
+        for (int slot : { 0, 2, 3 })
+        {
+            f.audio.setInputOscBot(slot,p);
+            FxSequenceParameters seq;seq.enabled=true;seq.rate=100;
+            for(int i=0;i<16;++i) seq.notes[size_t(i)]=24+(i+slot)%12;
+            f.audio.setInputSequence(slot,seq);
+        }
+        f.render(8192);
+        std::array<double, 200> times {};
+        double total = 0;
+        for (auto& ms : times)
+        {
+            const auto begin = std::chrono::steady_clock::now(); f.render(256);
+            ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+            total += ms;
+            for (int n = 0; n < 256; ++n)
+                require(std::isfinite(f.left[size_t(n)]) && std::abs(f.left[size_t(n)]) < .98f, "OSC BOT loaded callback unsafe");
+        }
+        std::sort(times.begin(), times.end());
+        std::cout << "OSC BOT full callback (3 sequences + ROBOT + 5 loops + TRACK FX) rate=" << rate
+            << " meanMs=" << total / times.size() << " p99Ms=" << times[197]
+            << " maxMs=" << times.back() << " deadlineMs=" << 256000 / rate << '\n';
+    }
+}
+
+void testRobotCallbackBudget()
+{
+    // Report, rather than assert wall time: OS scheduling is not deterministic.
+    // These timings include all five playing tracks, both TRACK FX and monitor.
+    for (double rate : { 44100., 48000. })
+    {
+        FiveTracks f(rate);
+        for (int n = 0; n < 4096; ++n)
+        { f.inputL[size_t(n)] = .04f * std::sin(n * .1f); f.inputR[size_t(n)] = .03f * std::sin(n * .13f); }
+        f.playAll(); f.render(4096); f.playAll();
+        TrackFxParameters effects; effects.enabled = true; effects.distortionEnabled = true;
+        f.audio.setTrackFxInsert(0, 0); f.audio.setTrackFxInsert(2, 0); f.audio.setTrackEffects(effects);
+        f.audio.setMonitoringEnabled(true);
+        for (int active : { 0, 1, 4 })
+        {
+            for (int slot = 0; slot < 4; ++slot) f.audio.setInputRobot(slot, { slot < active, 0, 0, 2 });
+            f.render(4096);
+            std::array<double, 200> times {};
+            double total = 0;
+            for (auto& ms : times)
+            {
+                const auto begin = std::chrono::steady_clock::now();
+                f.render(256);
+                ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - begin).count();
+                total += ms;
+                for (int n = 0; n < 256; ++n)
+                    require(std::isfinite(f.left[size_t(n)]) && std::abs(f.left[size_t(n)]) < .98f, "ROBOT loaded callback unsafe");
+            }
+            std::sort(times.begin(), times.end());
+            std::cout << "ROBOT full callback rate=" << rate << " activeSlots=" << active << " meanMs=" << total / times.size()
+                      << " p99Ms=" << times[197] << " maxMs=" << times.back() << " deadlineMs=" << 256000 / rate << '\n';
+        }
+    }
+}
+
 void testSharedTrackFxRouting()
 {
     using Command = LoopTrack::Command;
@@ -1135,9 +1614,28 @@ void testTrackPanelRouting()
 
 }
 
-int main()
+void runFxSequenceTests();
+void runRobotQualityTests(bool enforce);
+int main(int argc, char** argv)
 {
     juce::ScopedJuceInitialiser_GUI juce;
+    try
+    {
+        if (argc > 1 && std::string(argv[1]) == "--input-fx-shortcuts")
+        { testInputFxShortcuts(); testInputFxGroupAudio(); return 0; }
+        if (argc > 1 && std::string(argv[1]) == "--fx-sequence")
+        { runFxSequenceTests(); return 0; }
+        runFxSequenceTests();
+        if (argc > 1 && std::string(argv[1]) == "--robot-quality")
+        { runRobotQualityTests(argc < 3); return 0; }
+        if (argc > 1 && std::string(argv[1]) == "--osc-bot")
+        { runOscBotEffectTests(); return 0; }
+        if (argc > 1 && std::string(argv[1]) == "--osc-panel")
+        { testOscBotPanel(); return 0; }
+        runOscBotEffectTests();
+        runRobotQualityTests(true);
+    }
+    catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
     try { runRobotEffectTests(); }
     catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
     try
@@ -1145,7 +1643,8 @@ int main()
 #if defined(_MSC_VER) && defined(_DEBUG)
         const auto previous = _CrtSetAllocHook(fiveTrackAllocationHook);
 #endif
-        testFiveTracks(); testFiveQuantizedTracksAndMix(); testTrackPanelRouting(); testSharedTrackFxRouting(); testInputRobotIntegration(); testInputRobotPanel();
+        testFiveTracks(); testFiveQuantizedTracksAndMix(); testTrackPanelRouting(); testSharedTrackFxRouting(); testInputRobotIntegration(); testInputRobotPanel(); testRobotCallbackBudget();
+        testOscBotInputIntegration(); testOscBotPanel(); testFxSequenceIntegration(); testInputFxShortcuts(); testInputFxGroupAudio(); testSequenceSyncTransport(); testFxSequencePanel(); testOscBotCallbackBudget();
         testMeasureSync(); testSyncDriftAndRates(); testSyncLifecycleLimits();
 #if defined(_MSC_VER) && defined(_DEBUG)
         _CrtSetAllocHook(previous);

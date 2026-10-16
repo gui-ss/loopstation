@@ -6,6 +6,11 @@ MainComponent::MainComponent(AudioSystem& system) : audio(system)
     setOpaque(true);
     addAndMakeVisible(topPanel);
     topPanel.onInputRobotChanged = [this](int slot, RobotParameters p) { audio.setInputRobot(slot, p); };
+    topPanel.onInputSequenceChanged = [this](int slot, FxSequenceParameters p) { audio.setInputSequence(slot,p); };
+    topPanel.onInputOscBotChanged = [this](int slot, OscBotParameters p) { audio.setInputOscBot(slot, p); };
+    topPanel.onInputActivationChanged = [this](uint32_t mask,uint32_t robots,uint32_t oscs,bool restart)
+    { audio.setInputActivation(mask,robots,oscs,restart); };
+    topPanel.publishInputFx();
     topPanel.onTrackFxChanged = [this](TrackFxParameters value) { audio.setTrackEffects(value); };
     topPanel.onTrackInsertChanged = [this](int slot, int target) { audio.setTrackFxInsert(slot, target); timerCallback(); };
     topPanel.onTrackFxEnabled = [this](int index, bool enabled) { audio.setTrackFxEnabled(index, enabled); timerCallback(); };

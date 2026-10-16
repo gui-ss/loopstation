@@ -344,3 +344,72 @@ Consultados `references/RC-505mk2_Parameter_eng04_W.pdf`, páginas 2 e 6 (inclui
 5. Ajuste INSERT ALL e deixe várias pistas tocando. FX OFF em uma pista deve deixá-la seca; as outras continuam na soma processada. Experimente A e C simultâneos, seus faders, STOP/retomada, gravação em outra pista, overdub e Ctrl+Z no alvo escolhido por TRACK.
 
 Arquivos alterados: `Source/TrackFxRouting.h` (novo), `Source/AudioSystem.h/.cpp`, `Source/LoopTrack.h/.cpp`, `Source/TrackEffects.h/.cpp`, `Source/MainComponent.cpp`, `Source/TrackComponent.h/.cpp`, `Source/TopPanelComponent.h/.cpp`, `Source/MemoryDisplay.h/.cpp`, `Source/DisplayModel.h` (comentário), `Tests/AudioSystemTests.cpp`, `Tests/LoopTrackTests.cpp`, `CMakeLists.txt`, `README.md`, `AGENTS.md`, `docs/MK2_BEHAVIOR_REFERENCE.md` e este registro. PDFs e arquivos sincronizados não foram alterados.
+
+
+## Etapa 6H.1: INPUT FX ROBOT em tempo real
+
+### Referências confirmadas
+
+Consultados o Parameter Guide oficial preservado em `references/RC-505mk2_Parameter_eng04_W.pdf`, página 36 (tabela ROBOT também renderizada e inspecionada), página 5 (INPUT FX/INSERT) e página 2 (FX por pista), além de `docs/MK2_BEHAVIOR_REFERENCE.md`. A tabela define **NOTE C–B**, **FORMANT -50–+50** e **MODE 1/2**; os padrões destacados são C, 0 e 2. MODE 1 usa o algoritmo da série RC anterior e MODE 2 um algoritmo novo, mas o guia não publica seus métodos DSP. Não foram inventados controles de DRIVE, MIX, oitava ou outros parâmetros de ROBOT.
+
+Base técnica da aproximação: Julius O. Smith, [Vocoder Analysis — Introduction to Digital Filters](https://www.dsprelated.com/freebooks/filters/Vocoder_Analysis.html): decomposição por filtros em bandas, extração de envelopes e ressíntese por osciladores. A implementação abaixo escolhe uma grade harmônica fixa, em vez de tentar reconstruir a frequência original. Essa escolha e os dois modos são adaptações do protótipo, não algoritmos atribuídos à BOSS.
+
+### Ativação e controles
+
+1. Em **F5**, escolha o microfone e os fones na saída e habilite o monitoramento existente. Seu volume permanece independente e conserva o valor ajustado. Ativar ROBOT não liga o retorno automaticamente.
+2. Clique **INPUT FX EDIT**, depois **B** para selecionar o slot. B já contém BPF visual: sua seleção não foi substituída automaticamente e os valores anteriores permanecem guardados.
+3. No primeiro encoder, ajuste **FX TYPE = ROBOT**. Os outros três passam a editar **NOTE**, **FORMANT** e **MODE**, por arraste ou rodinha. NOTE oferece as 12 classes cromáticas de C a B; FORMANT mostra valores com sinal, inclusive -50 e +50; MODE aceita somente 1 ou 2.
+4. Pressione **EXIT** e clique **INPUT FX B** para ligar/desligar o efeito. No editor, A/B/C/D continuam apenas selecionando o slot sem alternar ON/OFF. Não é preciso gravar para ouvir ROBOT no retorno.
+5. Para gravar com ROBOT, mantenha **FX da pista ligado**. FX OFF nessa pista grava o microfone seco, conforme a habilitação por pista do guia, sem desligar o efeito ouvido no monitoramento. Reproduzir o loop não o envia novamente ao ROBOT.
+
+ROBOT pode ser escolhido em qualquer um dos quatro slots do banco A, com tipo e valores independentes. Não foi adicionado outro banco nem apagado o armazenamento dos tipos LPF/BPF/HPF/PHASER. Esses tipos de INPUT FX continuam visuais; os efeitos reais de TRACK FX não mudaram. Ao voltar de ROBOT para um tipo visual, seu DSP faz a transição ao seco. Selecioná-lo novamente recupera NOTE/FORMANT/MODE. Não há persistência entre execuções, como nas etapas anteriores.
+
+### Roteamento e segurança
+
+O único `AudioSystem` continua usando seu AudioDeviceManager e callback. A entrada selecionada passa pelos slots ROBOT ativos, em ordem A–D, uma vez por amostra. Esse resultado alimenta o monitor e, por meio da habilitação FX de cada pista, a captura inicial e o overdub. O retorno não usa um caminho seco paralelo adicional: apenas a transição curta ON/OFF mistura seco/processado. O monitor nunca entra no buffer gravado; TRACK FX continua exclusivamente na reprodução. Não foi criado ROBOT em TRACK FX.
+
+A gravação utiliza o mesmo fluxo processado mesmo com monitoramento desligado. FX OFF na pista usa o microfone original, com rampa de 20 ms ao mudar a habilitação. Ausência de entrada conserva o tratamento anterior de REC/overdub e limpa os estados do vocoder; reconexão limpa estados, conserva frases e deixa o monitor desligado. Os nomes/dispositivos selecionados, faders e volume do retorno não são alterados pelo efeito. O protótipo aplica INPUT FX à entrada mono/estéreo selecionada; não acrescenta a matriz completa MIC/INST/MAIN/SUB/INSERT do hardware.
+
+`RobotEffect` usa arrays fixos para 24 filtros de análise, envelopes estéreo, até 64 harmônicos e uma tabela de seno preparada antecipadamente. Coeficientes dos filtros são preparados com JUCE DSP fora do callback. Não há FFT, análise de pitch por janelas, lookahead, alocação, mutex, acesso a disco ou interface dentro do processamento. Dois buffers estéreo fixos de 256 frames reaproveitam os blocos internos existentes para entrada processada/captura. Controles via palavra atômica mantêm NOTE/FORMANT/MODE/ON coerentes por slot.
+
+- NOTE e MODE têm suavização de 20 ms; FORMANT, 30 ms; ON/OFF, crossfade de 20 ms, com bypass seco exato após a rampa.
+- O sinal processado é limitado suavemente a ±0,8 por canal antes da proteção final de soma já existente. Não se cria nenhum caminho de saída de volta à entrada. Isso não substitui o uso de fones para evitar microfonia acústica.
+- Sem input, não há portadora autônoma audível. Os canais de análise são independentes; mono é duplicado como antes. Estados antigos não são reaproveitados após desconexão ou conclusão de bypass.
+
+### Algoritmo e limitações explícitas
+
+A voz é ressintetizada a partir do envelope espectral: **não é um pitch shifter transparente**. NOTE fixa a grade harmônica em C3–B3 (aproximadamente 130,81–246,94 Hz), escolha interna do protótipo porque a tabela oficial não informa a oitava. Não há controle de oitava adicional.
+
+FORMANT remapeia o envelope entre bandas logarítmicas, sem transpor a portadora. O mapeamento interno -50/0/+50 corresponde a deslocamento de -0,75/0/+0,75 oitava do envelope. Ele pode mudar também o nível perceptivo como consequência da distribuição de energia, mas não é um simples ganho nem uma transposição da nota. A relação numérica entre FORMANT e deslocamento no hardware não é publicada e não foi presumida.
+
+- **MODE 1:** envelope agrupado em 12 bandas efetivas e síntese com padrão harmônico de amplitudes uniformes, produzindo um caráter mais grosseiro/metálico.
+- **MODE 2:** envelope de 24 bandas e pesos harmônicos derivados de pulso de 25%, com pré-ênfase para articulação (`sqrt(2) * sin(pi*h/4) / h^0.15`). O padrão de harmônicos e a resolução espectral diferem do modo 1. A troca interpola os dois resultados com fase contínua.
+
+As duas opções são aproximações tecnicamente distintas, **não reproduções dos modos proprietários antigo/novo da BOSS**. A análise é causal, sem atraso de bloco adicionado; filtros e seguidores de envelope têm resposta temporal dependente da frequência (ataque nominal de 3 ms e relaxamento de 18 ms), além da latência dos dispositivos. Não foi medida a latência acústica de ida e volta. Fricativas, transientes de beatbox, vozes polifônicas e sinais fora da faixa analisada podem perder naturalidade/definição. A faixa de análise é 80 Hz a min(8 kHz, 0,42 × sample rate), e o custo aumenta com a taxa e o número de slots ativos. Não foi garantido prazo de callback em todos os computadores/taxas.
+
+Não foi realizado teste de fala/canto/beatbox e escuta com microfone e fones físicos. Os testes comprovam transformação e roteamento; **qualidade vocal convincente, inteligibilidade subjetiva e fidelidade sonora à MK2 continuam sem validação por escuta**.
+
+### Resultado dos testes
+
+Aplicativo e testes compilados em **Visual Studio 2022, Debug x64**. CTest: **1/1 aprovado em 75,69 s**. O LCD foi renderizado e inspecionado com ROBOT, C#, +50 e MODE 1; glifos #/+ foram acrescentados ao alfabeto pixelado existente, sem alterar a geometria do painel.
+
+- NOTE C/E/G/B: a energia migra da frequência de entrada para a grade harmônica selecionada.
+- FORMANT -50/0/+50, com vogal sintética: centroides espectrais normalizados de **6,32499 / 11,6756 / 17,6572 harmônicos**, mantendo a frequência nominal da portadora; a mudança não se reduz a ganho.
+- MODE 1/2: diferença entre espectros normalizados de **0,55533**, demonstrando alteração de distribuição harmônica além de volume.
+- Bypass exato após suavização, silêncio, independência estéreo, limites e mudanças de parâmetros nas taxas 8/44,1/48/96/192 kHz; detector CRT sem alocações no processamento/atualização dos controles de ROBOT.
+- Callback de produção com retorno ativo e nenhuma frase gravada; áudio processado vivo; um único caminho de retorno; captura processada e seca em pistas simultâneas; reprodução preservada sem reaplicar ROBOT; gravação com ROBOT OFF; overdub/Undo com TRACK FX ativo; falta de entrada e reconexão.
+- Interface real → motor: seleção B, FX TYPE, valores e faixa assinada, rodinha, LCD, ON/OFF, seleção sem alternar o estado, EXIT e recuperação dos valores de BPF/ROBOT.
+- Regressões existentes das cinco pistas, faders, LPF/DISTORTION/INSERT, dispositivos, monitoramento, BPM/TAP, QUANTIZE e LOOP SYNC passaram. F5 e sua implementação não foram alterados; não se afirma uma nova verificação manual desse atalho.
+
+Para avaliação por escuta: com ROBOT em B e retorno ligado, fale/cante/faça beatbox; compare OFF/ON, C/E/G/B, FORMANT -50/0/+50 e MODE 1/2. Grave uma frase com efeito e outra sem, desligue o retorno e reproduza ambas. Confira que o efeito gravado permanece ao desligar B, que a frase seca permanece seca ao ligar B, e que TRACK FX ainda pode processar as reproduções de acordo com INSERT.
+
+Arquivos: novos `Source/RobotParameters.h`, `Source/RobotEffect.h/.cpp` e `Tests/RobotEffectTests.cpp`; alterados `Source/AudioSystem.h/.cpp`, `Source/InputFxEditor.h`, `Source/MemoryDisplay.h/.cpp`, `Source/TopPanelComponent.h/.cpp`, `Source/MainComponent.cpp`, `Source/VisualStyle.cpp`, `Tests/AudioSystemTests.cpp`, `CMakeLists.txt`, `README.md`, `AGENTS.md`, `docs/MK2_BEHAVIOR_REFERENCE.md` e este registro. PDFs e materiais sincronizados permaneceram intactos.
+
+## Etapa 6H.3A — OSC BOT no INPUT FX
+
+Consulte [OSC_BOT_6H3A.md](OSC_BOT_6H3A.md) para parâmetros e padrões oficiais, acesso às duas páginas do visor, aproximações de síntese/modulação, integração antes da gravação e resultados de Debug x64. OSC BOT e ROBOT têm valores independentes por slot; selecionar o novo tipo não apaga configurações anteriores. FX SEQUENCE e presets permanecem fora do escopo.
+
+
+### Atualização de implementação — etapa 6H.3B
+
+FX SEQUENCE controla NOTE de OSC BOT por slot A–D do banco A, com até 16 passos no callback e referência do MusicalClock. O LCD existente edita SW/SYNC/RETRIG/TARGET/RATE/MAX/VAL1–16 e INPUT MODE SINGLE/MULTI. 2MEAS é a duração de cada passo (oito batidas em 4/4). Slots adjacentes de OSC BOT em MULTI têm mistura paralela para conservar as duas vozes. Consulte [FX_SEQUENCE_6H3B.md](FX_SEQUENCE_6H3B.md) para presets de validação, acesso, testes Debug x64 e limitações explícitas: curva RATE numérico local, interpretação de SYNC/RETRIG, prioridade de frase e topologia MULTI não verificadas em hardware. Nenhum preset é carregado automaticamente, e não há novas observações do vídeo ou alegação de fidelidade sonora exata.

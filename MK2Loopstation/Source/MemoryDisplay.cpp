@@ -174,10 +174,18 @@ void MemoryDisplay::setEditorField(int knob, int value)
     }
     if (! model.inputEditor.open) return;
     model.inputEditor.setField(knob, value);
+    if (!model.inputEditor.multi)
+    {
+        int keep=model.inputEditor.selectedSlot;
+        if (!model.inputEffects[size_t(keep)].enabled)
+            for(int i=0;i<4;++i) if(model.inputEffects[size_t(i)].enabled) {keep=i; break;}
+        for(int i=0;i<4;++i) if(i!=keep) model.inputEffects[size_t(i)].enabled=false;
+    }
     auto& effect = model.inputEffects[static_cast<size_t>(model.inputEditor.selectedSlot)];
     effect.name = InputFxEditor::types[static_cast<size_t>(model.inputEditor.selectedType())];
     effect.lines = model.inputEditor.selectedType() == 3 ? std::array<juce::String, 2>{ "PHA", "SER" }
                                              : model.inputEditor.selectedType() == 4 ? std::array<juce::String, 2>{ "RO", "BOT" }
+                                             : model.inputEditor.selectedType() == 5 ? std::array<juce::String, 2>{ "OSC", "BOT" }
                                              : std::array<juce::String, 2>{ effect.name, "" };
     updateAccessibleDescription();
     repaint();
@@ -318,6 +326,8 @@ void MemoryDisplay::updateEffect(EffectGroup group, int index, bool enabled)
 {
     auto& effects = group == EffectGroup::input ? model.inputEffects : model.trackEffects;
     if (! juce::isPositiveAndBelow(index, static_cast<int>(effects.size()))) return;
+    if (group==EffectGroup::input && enabled && !model.inputEditor.multi)
+        for (auto& e:model.inputEffects) e.enabled=false;
     effects[static_cast<size_t>(index)].enabled = enabled;
     if (group == EffectGroup::track && index == 0) model.trackFx.enabled = enabled;
     if (group == EffectGroup::track && index == 2) model.trackFx.distortionEnabled = enabled;
@@ -520,6 +530,11 @@ void MemoryDisplay::paintInputEditor(juce::Graphics& g)
         VisualStyle::lcdText(g, model.trackFx.distortionEnabled ? "ON" : "OFF", { 96, 0, 16, 8 }, 0.7f);
     }
     else VisualStyle::lcdText(g, model.trackEditorOpen ? "TRACK FX:FX A-A" : "INPUT FX:FX A-" + editor.slotLetter(), { 1, 0, 77, 8 }, 0.8f);
+    if (!model.trackEditorOpen && editor.selectedType()==5 && editor.page>=2)
+    {
+        g.setColour(lcdBackground); g.fillRect(0,0,112,8); g.setColour(lcdInk);
+        VisualStyle::lcdText(g,"FX SEQ:A-"+editor.slotLetter()+" "+juce::String(editor.page-1)+"/6",{1,0,111,8},.8f);
+    }
     g.fillRect(1, 9, 126, 1);
     juce::Path arrows;
     if (! model.trackEditorOpen && editor.page > 0) arrows.addTriangle(114, 4, 118, 1, 118, 7);
@@ -548,7 +563,7 @@ void MemoryDisplay::paintInputEditor(juce::Graphics& g)
                     g.fillRect(x + 16 + col, 34.0f + row, 1.0f, 1.0f);
         g.fillRect(x + 8, 41.0f, 2.0f, 2.0f);
         g.fillRect(x + 23, 41.0f, 2.0f, 2.0f);
-        const float angle = juce::degreesToRadians(-135.0f + 270.0f * (field.value - field.minimum) / (field.maximum - field.minimum));
+        const float angle = juce::degreesToRadians(-135.0f + 270.0f * (field.value - field.minimum) / juce::jmax(1,field.maximum - field.minimum));
         const juce::Point<float> centre(x + 16, 34);
         const auto tip = centre.getPointOnCircumference(5.0f, angle);
         g.setColour(lcdBackground);

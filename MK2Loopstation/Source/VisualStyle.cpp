@@ -117,6 +117,7 @@ void VisualStyle::lcdText(juce::Graphics& g, const juce::String& text,
             case 'S': return {15,16,16,14,1,1,30};
             case 'T': return {31,4,4,4,4,4,4};
             case 'U': return {17,17,17,17,17,17,14};
+            case '/': return {1,2,2,4,8,8,16};
             case '#': return {10,31,10,10,31,10,0};
             case '+': return {0,4,4,31,4,4,0};
             case '-': return {0,0,0,31,0,0,0};

@@ -20,6 +20,18 @@ public:
     // Audio-thread queries used by the shared transport; never inspect RAM from UI.
     bool needsSyncReference() const noexcept;
     bool retainsSyncReference() const noexcept;
+    // Audio-thread-only cursor/boundary observation; never seeks or changes audio.
+    uint64_t phraseEpoch() const noexcept { return playbackEpoch; }
+    double phraseSeconds() const noexcept
+    { return (state==State::playing || state==State::overdubbing) ? position/recordedRate : -1.; }
+    int framesToPhraseEdge() const noexcept
+    {
+        if (state==State::playing || state==State::overdubbing)
+            return std::max(1,int(std::ceil((length-position)/playbackStep-1.e-7)));
+        if (state==State::recording)
+            return std::max(1,(awaitingBoundary ? std::min(captureLimit,playAtFrame) : captureLimit)-length);
+        return 0x7fffffff;
+    }
     struct Snapshot
     {
         State state;
@@ -64,6 +76,7 @@ private:
     double syncPosition(double bar) const noexcept;
     void requestPlayback(bool hasOutput) noexcept;
 
+    uint64_t playbackEpoch=0;
     SyncWait syncWait = SyncWait::none;
     SyncIssue syncIssue = SyncIssue::none;
     bool syncBound = false, syncCapture = false, syncPlaying = false, syncSetting = false;

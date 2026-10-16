@@ -300,6 +300,7 @@ void AudioSystem::audioDeviceAboutToStart(juce::AudioIODevice* device)
     clock.prepare(device->getCurrentSampleRate());
     trackFx.prepare(device->getCurrentSampleRate());
     for (auto& robot : inputRobots) robot.prepare(device->getCurrentSampleRate());
+    for (auto& osc : inputOscBots) osc.prepare(device->getCurrentSampleRate());
     for (int i = 0; i < trackCount; ++i)
     {
         inputFxGate[size_t(i)].reset(device->getCurrentSampleRate(), .02);
@@ -323,6 +324,7 @@ void AudioSystem::releaseUnusedSync() noexcept
 void AudioSystem::audioDeviceStopped()
 {
     for (auto& robot : inputRobots) robot.reset();
+    for (auto& osc : inputOscBots) osc.reset();
     for (auto& track : tracks) if (track) track->suspend();
     releaseUnusedSync();
     monitoring.store(false, std::memory_order_relaxed);
@@ -358,7 +360,11 @@ void AudioSystem::audioDeviceIOCallbackWithContext(const float* const* inputs, i
     else monitorGain.setTargetValue(volume.load(std::memory_order_relaxed));
     if (! deviceFailed.load(std::memory_order_relaxed))
         processTracks(inputs, numInputs, outputs, numOutputs, numSamples, barFrames);
-    else for (auto& robot : inputRobots) robot.reset();
+    else
+    {
+        for (auto& robot : inputRobots) robot.reset();
+        for (auto& osc : inputOscBots) osc.reset();
+    }
 }
 
 void AudioSystem::tapTempo()
@@ -381,23 +387,85 @@ void AudioSystem::processTracks(const float* const* inputs, int numInputs,
     // Fixed chunks bound scratch RAM irrespective of driver callback size.
     // Pre-fader playback and smoothed gains stay separate from microphone/monitor.
     trackFx.beginBlock();
-    for (auto& robot : inputRobots) robot.beginBlock();
+    const auto activation=inputActivation.load(std::memory_order_acquire);
+    const bool managed=(activation & 0x1000u)!=0;
+    const bool restartPair=managed && (activation>>16)!=(consumedInputActivation>>16) && (activation&3u)==3u;
+    consumedInputActivation=activation;
+    const auto timing=clock.blockTiming();
+    bool sequenceSync=false;
+    for (size_t slot=0;slot<inputOscBots.size();++slot)
+    {
+        const auto bit=uint64_t(1)<<slot;
+        inputRobots[slot].beginBlock(managed ? int((activation&bit)!=0 && ((activation>>4)&bit)!=0) : -1);
+        auto& osc=inputOscBots[slot];
+        osc.beginBlock(managed ? int((activation&bit)!=0 && ((activation>>8)&bit)!=0) : -1);
+        osc.beginSequenceBlock(timing.beatsPerSample,timing.secondsPerSample);
+        sequenceSync |= osc.sequenceSynced();
+    }
     for (int i = 0; i < trackCount; ++i) inputFxGate[size_t(i)].setTargetValue(trackFxEnabled(i) ? 1.f : 0.f);
     bool hasOutput = false;
     for (int ch = 0; outputs != nullptr && ch < numOutputs; ++ch) hasOutput |= outputs[ch] != nullptr;
     bool keepReference = false;
     for (int offset = 0; offset < numSamples || (offset == 0 && numSamples == 0);)
     {
-        const int frames = std::min(routingBlockSize, numSamples - offset);
+        int frames = std::min(routingBlockSize, numSamples - offset);
         const float* mic[2] { inputs != nullptr && numInputs > 0 && inputs[0] ? inputs[0] + offset : nullptr,
                              inputs != nullptr && numInputs > 1 && inputs[1] ? inputs[1] + offset : nullptr };
         const bool haveInput = mic[0] != nullptr || mic[1] != nullptr;
-        if (! haveInput) for (auto& robot : inputRobots) robot.reset();
+        if (! haveInput)
+        {
+            for (auto& robot : inputRobots) robot.reset();
+            for (auto& osc : inputOscBots) osc.reset();
+        }
+        // Observe transport before INPUT FX, bounded at phrase/REC boundaries.
+        int reference=-1;
+        double phrase=-1;
+        for (int i=0;i<trackCount;++i)
+        {
+            auto sync=blockSync; sync.configured=(blockSyncMask & (uint32_t(1)<<i))!=0;
+            sync.enabled &= sync.configured;
+            if (sync.enabled) sync.bar += offset/sync.framesPerBar;
+            auto& track=*tracks[size_t(i)];
+            track.setQuantizeEnabled(enabled);
+            float* out[] {playbackScratch[size_t(i)][0].data(),playbackScratch[size_t(i)][1].data()};
+            track.process(mic,std::min(numInputs,2),out,hasOutput?2:0,0,barFrames,sync);
+            if (reference<0 && track.phraseSeconds()>=0) { reference=i; phrase=track.phraseSeconds(); }
+            if (sequenceSync)
+            {
+                frames=std::min(frames,track.framesToPhraseEdge());
+                if (sync.enabled && track.syncStatus().waiting!=LoopTrack::SyncWait::none)
+                    frames=std::min(frames,std::max(1,int(std::ceil((std::ceil(sync.bar-1.e-10)-sync.bar)*sync.framesPerBar-1.e-7))));
+            }
+        }
+        const uint64_t epoch=reference>=0 ? tracks[size_t(reference)]->phraseEpoch() : 0;
+        const bool cue=reference>=0 && (reference!=sequenceReference || epoch!=previousPhraseEpoch);
+        for (auto& osc:inputOscBots)
+        { if (cue) osc.phraseStart(); if (offset==0) osc.alignActivation(phrase); }
+        if (offset==0 && restartPair)
+            for (size_t slot=0;slot<2;++slot) inputOscBots[slot].startGroup(phrase);
+        sequenceReference=reference; previousPhraseEpoch=epoch;
         for (int frame = 0; frame < frames; ++frame)
         {
             float l = mic[0] ? mic[0][frame] : 0.f;
             float r = numInputs == 1 ? l : mic[1] ? mic[1][frame] : 0.f;
-            if (haveInput) for (auto& robot : inputRobots) robot.processFrame(l, r);
+            // Adjacent oscillator voices share an excitation in MULTI, rather
+            // than letting the last BALANCE=100 voice erase the earlier notes.
+            // Convex parallel blend is a local approximation, not BOSS topology.
+            for (size_t slot=0;slot<inputRobots.size();)
+            {
+                inputRobots[slot].processFrame(l,r);
+                if (!inputOscBots[slot].active())
+                { inputOscBots[slot].processFrame(l,r); ++slot; continue; }
+                size_t end=slot+1;
+                while (end<inputOscBots.size() && inputOscBots[end].active() && !inputRobots[end].active()) ++end;
+                float dl=0,dr=0,weight=0;
+                for (size_t voice=slot;voice<end;++voice)
+                {
+                    float vl=l,vr=r; inputOscBots[voice].processFrame(vl,vr);
+                    dl+=vl-l; dr+=vr-r; weight+=inputOscBots[voice].wetWeight();
+                }
+                l+=dl/std::max(1.f,weight); r+=dr/std::max(1.f,weight); slot=end;
+            }
             processedInput[0][size_t(frame)] = l; processedInput[1][size_t(frame)] = r;
         }
         for (int i = 0; i < trackCount; ++i)

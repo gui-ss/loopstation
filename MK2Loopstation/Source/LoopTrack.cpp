@@ -107,6 +107,7 @@ void LoopTrack::suspend() noexcept
 
 void LoopTrack::startPlayback() noexcept
 {
+    ++playbackEpoch;
     state = State::playing;
     position = 0;
     playbackStep = recordedRate / deviceRate;
@@ -386,7 +387,7 @@ void LoopTrack::process(const float* const* inputs, int numInputs, float* const*
                 }
             }
             position += playbackStep;
-            if (position >= length) position -= std::floor(position / length) * length;
+            if (position >= length) { position -= std::floor(position / length) * length; ++playbackEpoch; }
         }
         else if (tailRemaining > 0)
         {

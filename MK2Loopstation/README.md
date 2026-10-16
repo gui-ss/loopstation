@@ -211,3 +211,14 @@ Referência de configuração: [documentação oficial de CMake do JUCE 8.0.6](h
 FX de cada pista agora habilita sua participação nos efeitos reais. TRACK abre a configuração FX da pista e mantém a seleção de Undo; selecionar uma pista não redireciona A/C.
 
 Para escolher o destino: **TRACK FX EDIT → selecione A/C pelas setas → ENTER → knob 1: INSERT ALL ou TRACK1–5**. EXIT volta aos parâmetros; outro EXIT sai. Os botões superiores A/C continuam ligando/desligando LPF e DISTORTION compartilhados. Ambos começam em TRACK1 para preservar o comportamento anterior. Os parâmetros existentes não mudaram. Veja escopo, topologia e validação em [docs/technical-reference.md](docs/technical-reference.md#etapa-6h-fx-por-pista-e-insert-compartilhado).
+
+
+### Etapa 6H.1 — ROBOT ao vivo no INPUT FX
+
+1. Abra **F5**, selecione microfone/fones e ligue o monitoramento com o volume desejado.
+2. Abra **INPUT FX EDIT → B** e use o **knob 1** para selecionar **ROBOT**. O BPF anterior e seus valores são preservados.
+3. **Knob 2: NOTE; knob 3: FORMANT (-50 a +50); knob 4: MODE (1/2)**. Arraste ou use a rodinha.
+4. Saia com **EXIT** e clique **INPUT FX B** para ligar/desligar. Não é necessário gravar para ouvir.
+5. Com **FX da pista ON**, a gravação/overdub recebe ROBOT; com FX OFF, recebe o microfone seco. O efeito não é reaplicado ao reproduzir o loop.
+
+Debug x64 compilado e suíte aprovada (1/1, 75,69 s). ROBOT é uma aproximação por vocoder, com parâmetros oficiais, não uma reprodução sonora comprovada da BOSS. Fala/beatbox e escuta com dispositivos físicos ainda precisam de avaliação. Veja [implementação, testes e limitações](docs/technical-reference.md#etapa-6h1-input-fx-robot-em-tempo-real).

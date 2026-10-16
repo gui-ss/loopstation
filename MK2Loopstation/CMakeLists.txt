@@ -6,6 +6,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
+# Keep the small real-time vocoder optimised even in Debug. The rest of the
+# application retains Debug checks/symbols; /RTC instrumentation in this hot
+# translation unit exceeded the audio deadline at low NOTE (6H.2 measurements).
+set_source_files_properties(Source/RobotEffect.cpp Source/OscBotEffect.cpp Source/FxSequence.cpp PROPERTIES COMPILE_OPTIONS
+    "$<$<CXX_COMPILER_ID:MSVC>:/O2;/Ob2>"
+    VS_SETTINGS "BasicRuntimeChecks=Default")
+
 include(FetchContent)
 FetchContent_Declare(JUCE
     URL https://github.com/juce-framework/JUCE/archive/refs/tags/8.0.6.tar.gz
@@ -17,6 +24,7 @@ FetchContent_MakeAvailable(JUCE)
 juce_add_gui_app(MK2Loopstation PRODUCT_NAME "MK2 Loopstation")
 
 target_sources(MK2Loopstation PRIVATE
+    Source/InputFxShortcuts.h
     Source/Main.cpp
     Source/AudioSystem.h
     Source/MusicalClock.h
@@ -30,6 +38,11 @@ target_sources(MK2Loopstation PRIVATE
     Source/RobotParameters.h
     Source/RobotEffect.h
     Source/RobotEffect.cpp
+    Source/FxSequence.h
+    Source/FxSequence.cpp
+    Source/OscBotParameters.h
+    Source/OscBotEffect.h
+    Source/OscBotEffect.cpp
     Source/TrackFxParameters.h
     Source/AudioSettingsWindow.h
     Source/AudioSettingsWindow.cpp
@@ -73,6 +86,8 @@ if(MK2_BUILD_AUDIO_TESTS)
     enable_testing()
     juce_add_console_app(MK2AudioTests PRODUCT_NAME "MK2 Audio Tests")
     target_sources(MK2AudioTests PRIVATE Tests/AudioSystemTests.cpp Tests/LoopTrackTests.cpp Tests/MusicalClockTests.cpp Source/AudioSystem.cpp Source/LoopTrack.cpp Source/TrackEffects.cpp Source/RobotEffect.cpp Tests/RobotEffectTests.cpp)
+    target_sources(MK2AudioTests PRIVATE Tests/RobotQualityTests.cpp)
+    target_sources(MK2AudioTests PRIVATE Source/FxSequence.cpp Source/OscBotEffect.cpp Tests/OscBotEffectTests.cpp Tests/FxSequenceTests.cpp)
     target_include_directories(MK2AudioTests PRIVATE Source)
     target_sources(MK2AudioTests PRIVATE Tests/TempoPanelTests.cpp Source/TopPanelComponent.cpp
         Source/MemoryDisplay.cpp Source/PanelControls.cpp Source/VisualStyle.cpp

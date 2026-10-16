@@ -41,6 +41,17 @@ public:
         value.enabled = model.inputEditor.slots[size_t(slot)].type == 4 && model.inputEffects[size_t(slot)].enabled;
         return value;
     }
+    OscBotParameters inputOscBot(int slot) const
+    {
+        if (!juce::isPositiveAndBelow(slot, 4)) return {};
+        auto value = model.inputEditor.slots[size_t(slot)].oscBot;
+        value.enabled = model.inputEditor.slots[size_t(slot)].type == 5 && model.inputEffects[size_t(slot)].enabled;
+        return value;
+    }
+    FxSequenceParameters inputSequence(int slot) const { return model.inputEditor.slots[size_t(slot)].sequence; }
+    bool inputMulti() const { return model.inputEditor.multi; }
+    int inputType(int slot) const { return model.inputEditor.slots[size_t(slot)].type; }
+    bool inputEnabled(int slot) const { return model.inputEffects[size_t(slot)].enabled; }
     int selectedInputSlot() const { return model.inputEditor.selectedSlot; }
     TrackFxParameters getTrackFx() const { return model.trackFx; }
     juce::String getTrackSlotLetter() const { return model.trackEditorSlot == 2 ? "C" : "A"; }

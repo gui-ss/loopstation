@@ -6,6 +6,7 @@
 #include "MusicalClock.h"
 #include "TrackFxRouting.h"
 #include "RobotEffect.h"
+#include "OscBotEffect.h"
 
 // Owns device lifetime independently of the panel and the settings window.
 // Device operations and status snapshots belong to the message thread.
@@ -38,8 +39,20 @@ public:
     bool commandTrack1(LoopTrack::Command command) { return commandTrack(0, command); }
     LoopTrack::Snapshot track1Snapshot() const { return trackSnapshot(0); }
     void setTrack1Volume(float gain) { setTrackVolume(0, gain); }
+    // GUI producer: gates, type masks and group-start serial form ONE release
+    // publication. Later UI requests may coalesce before the next callback.
+    void setInputActivation(uint32_t mask, uint32_t robotMask, uint32_t oscMask, bool restartPair) noexcept
+    {
+        const auto old=inputActivation.load(std::memory_order_relaxed);
+        const auto serial=(old & ~uint64_t(0xffff)) + (restartPair ? uint64_t(1)<<16 : 0);
+        inputActivation.store(serial | 0x1000u | (mask&15u) | ((robotMask&15u)<<4) | ((oscMask&15u)<<8),std::memory_order_release);
+    }
     void setInputRobot(int slot, RobotParameters parameters)
     { if (juce::isPositiveAndBelow(slot, 4)) inputRobots[size_t(slot)].setParameters(parameters); }
+    void setInputOscBot(int slot, OscBotParameters parameters)
+    { if (juce::isPositiveAndBelow(slot, 4)) inputOscBots[size_t(slot)].setParameters(parameters); }
+    void setInputSequence(int slot, const FxSequenceParameters& p)
+    { if (juce::isPositiveAndBelow(slot,4)) inputOscBots[size_t(slot)].setSequence(p); }
     void setTrackEffects(TrackFxParameters value) { trackFx.setParameters(value); }
     void setTrack1Effects(TrackFxParameters value) { setTrackEffects(value); } // Legacy caller; destinations are independent.
     void setTrackFxInsert(int slot, int target) { trackFx.setInsert(slot, target); }
@@ -82,7 +95,12 @@ private:
 
     std::unique_ptr<juce::AudioDeviceManager> manager;
     std::array<std::unique_ptr<LoopTrack>, trackCount> tracks;
+    std::atomic<uint64_t> inputActivation{0};
+    uint64_t consumedInputActivation=0; // Audio thread only.
     std::array<RobotEffect, 4> inputRobots;
+    std::array<OscBotEffect, 4> inputOscBots;
+    int sequenceReference=-1;
+    uint64_t previousPhraseEpoch=0;
     std::array<std::array<float, 256>, 2> processedInput {}, captureInput {};
     std::array<juce::SmoothedValue<float>, 5> inputFxGate;
     TrackFxRouting trackFx; // One LPF + one DISTORTION shared by all five tracks.

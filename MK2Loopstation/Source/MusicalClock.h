@@ -24,6 +24,8 @@ public:
         double bar = 0, framesPerBar = 0; // Position at block START, from this same clock.
         bool configured = false; // SW can remain ON when an operation is refused.
     };
+    struct Timing { double beatsPerSample = 1./24000., secondsPerSample = 1./48000.; };
+    Timing blockTiming() const noexcept { return timing; } // Audio thread only.
     static constexpr double minimumBpm = 40.0, maximumBpm = 300.0;
     bool setBpm(double bpm) noexcept
     {
@@ -67,6 +69,7 @@ public:
         const double blockBpm = bpm();
         const double nominalBarFrames = 240.0 * sampleRate / blockBpm;
         const double barFrames = syncPeriod > 0 ? syncPeriod * sampleRate : nominalBarFrames;
+        timing = {4.0 / barFrames, 1.0 / sampleRate};
         if (samples <= 0) return nominalBarFrames;
         // Compensated accumulation limits rounding drift across small blocks.
         const double increment = samples * 4.0 / barFrames - rounding;
@@ -83,6 +86,7 @@ public:
         return { value, beat, beat / 4, static_cast<int>(beat % 4), value - static_cast<double>(beat) };
     }
 private:
+    Timing timing;
     static constexpr int tempoLock = 1 << 16;
     double syncPeriod = 0, syncOrigin = 0; // Seconds/bar and beat origin, not another running clock.
     std::atomic<int> tempo { 1200 };

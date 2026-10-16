@@ -21,6 +21,12 @@ public:
     std::function<void(int, int)> onTrackInsertChanged;
     std::function<void(TrackFxParameters)> onTrackFxChanged;
     std::function<void(int, RobotParameters)> onInputRobotChanged;
+    std::function<void(int, OscBotParameters)> onInputOscBotChanged;
+    std::function<void(int, FxSequenceParameters)> onInputSequenceChanged;
+    std::function<void(uint32_t, uint32_t, uint32_t, bool)> onInputActivationChanged;
+    void activateInputSlot(int slot);
+    bool toggleInputPair(); // No-op in SINGLE; one publication in MULTI.
+    void publishInputFx(bool restartPair = false);
     std::function<void()> onTapTempo;
     std::function<void(double)> onBpmChanged;
     void updateClock(double bpm, double beats, const std::array<float, 5>& loopProgress, bool running);

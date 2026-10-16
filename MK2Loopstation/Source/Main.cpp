@@ -1,5 +1,6 @@
 #include "MainComponent.h"
 #include "AudioSettingsWindow.h"
+#include "InputFxShortcuts.h"
 
 class MK2Application final : public juce::JUCEApplication
 {
@@ -27,7 +28,9 @@ private:
             : DocumentWindow(name, juce::Colour(0xff17181b), allButtons), audio(system)
         {
             setUsingNativeTitleBar(true);
-            setContentOwned(new MainComponent(audio), true);
+            auto* panel=new MainComponent(audio);
+            setContentOwned(panel, true);
+            inputShortcuts.onPress=[panel](int index) { panel->inputFxShortcut(index); };
             // Listen only to the bare panel, not to its buttons, knobs or faders.
             getContentComponent()->addMouseListener(this, false);
             setResizable(true, false);
@@ -46,6 +49,7 @@ private:
 
         bool keyPressed(const juce::KeyPress& key) override
         {
+            if(inputShortcuts.keyPressed(key,juce::Component::getCurrentlyFocusedComponent(),isActiveWindow())) return true;
             if (key.getKeyCode() == 'L' && key.getModifiers().getRawFlags() == 0)
             {
                 if (! syncKeyHeld) audio.setAllLoopSync(! audio.allLoopSyncEnabled());
@@ -78,6 +82,7 @@ private:
 
         bool keyStateChanged(bool) override
         {
+            inputShortcuts.updateDownKeys(InputFxShortcuts::downKeys());
             if (! juce::KeyPress::isKeyCurrentlyDown('L')) syncKeyHeld = false;
             if (! juce::KeyPress::isKeyCurrentlyDown('Q')) quantizeKeyHeld = false;
             return false;
@@ -86,6 +91,7 @@ private:
         void activeWindowStatusChanged() override
         {
             juce::DocumentWindow::activeWindowStatusChanged();
+            inputShortcuts.focusChanged(InputFxShortcuts::downKeys());
             if (! isActiveWindow()) { quantizeKeyHeld = false; syncKeyHeld = false; }
         }
 
@@ -94,6 +100,7 @@ private:
             juce::JUCEApplication::getInstance()->systemRequestedQuit();
         }
     private:
+        InputFxShortcuts inputShortcuts;
         AudioSystem& audio;
         bool quantizeKeyHeld = false, syncKeyHeld = false;
         std::unique_ptr<AudioSettingsWindow> settings;

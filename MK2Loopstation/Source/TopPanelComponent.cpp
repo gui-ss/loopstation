@@ -32,19 +32,8 @@ TopPanelComponent::TopPanelComponent()
         auto* inputFx = button(caption, Style::ledCircle, colour, { 36.0f + i * 55.0f, 189.0f, 42.0f, 42.0f });
         auto* trackFx = button(caption, Style::ledCircle, colour, { 959.0f + i * 55.0f, 189.0f, 42.0f, 42.0f });
         inputFxButtons[static_cast<size_t>(i)] = inputFx;
-        inputFx->onClick = [this, inputFx, i]
-        {
-            if (display.isInputEditing())
-            {
-                display.selectInputSlot(i);
-                refreshParameterKnobs();
-            }
-            else
-            {
-                display.updateEffect(EffectGroup::input, i, inputFx->getToggleState());
-                if (onInputRobotChanged) onInputRobotChanged(i, display.inputRobot(i));
-            }
-        };
+        inputFx->setTooltip("INPUT FX " + caption + " (F" + juce::String(6+i) + "); A+B: F10 em MULTI");
+        inputFx->onClick = [this, i] { activateInputSlot(i); };
         trackFx->onClick = [this, trackFx, i]
         {
             display.updateEffect(EffectGroup::track, i, trackFx->getToggleState());
@@ -70,8 +59,7 @@ TopPanelComponent::TopPanelComponent()
             else if (display.isRoutingEditing() && onTrackInsertChanged)
                 onTrackInsertChanged(display.editedSlot(), display.insertDestination());
             else if (display.isTrackEditing() && onTrackFxChanged) onTrackFxChanged(display.getTrackFx());
-            if (display.isInputEditing() && onInputRobotChanged)
-                onInputRobotChanged(display.selectedInputSlot(), display.inputRobot(display.selectedInputSlot()));
+            if (display.isInputEditing()) publishInputFx();
             if (changesType) refreshParameterKnobs();
         };
         addControl(std::move(parameter), { 456.0f + i * 76.0f, 181.0f, 60.0f, 60.0f });
@@ -155,10 +143,10 @@ void TopPanelComponent::refreshParameterKnobs()
         const auto field = display.getEditorField(static_cast<int>(i));
         const bool tempo = display.isTempoEditing();
         control.setTempoMode(tempo && i == 3);
-        control.setRange(tempo && i == 3 ? 400 : field.minimum, field.maximum, 1);
+        control.setRange(tempo && i == 3 ? 400 : field.minimum, juce::jmax(field.minimum+1,field.maximum), 1);
         control.setValue(field.value, juce::dontSendNotification);
         const bool editing = tempo || display.isInputEditing() || display.isTrackEditing() || display.isTrackSettings();
-        control.setEnabled(editing && field.available);
+        control.setEnabled(editing && field.available && field.maximum>field.minimum);
         control.setTitle(tempo && i == 3 ? "TEMPO BPM - wheel: 1 BPM; Shift+wheel: 0.1 BPM" : editing && field.available ? (display.isTrackSettings() ? "TRACK SETTINGS " : display.isTrackEditing() ? "TRACK FX " + display.getTrackSlotLetter() + " " : "INPUT FX " + display.getInputSlotLetter() + " ") + field.name
                          : "Parameter knob " + juce::String(static_cast<int>(i) + 1));
         control.repaint();
@@ -303,4 +291,41 @@ void TopPanelComponent::paint(juce::Graphics& g)
     arrows.addTriangle(895, 157, 899, 151, 903, 157);
     arrows.addTriangle(895, 178, 903, 178, 899, 184);
     g.fillPath(arrows);
+}
+
+void TopPanelComponent::publishInputFx(bool restartPair)
+{
+    uint32_t mask=0, robotMask=0, oscMask=0;
+    for(int slot=0;slot<4;++slot)
+    {
+        inputFxButtons[size_t(slot)]->setToggleState(display.inputEnabled(slot),juce::dontSendNotification);
+        if(onInputSequenceChanged) onInputSequenceChanged(slot,display.inputSequence(slot));
+        if(onInputRobotChanged) onInputRobotChanged(slot,display.inputRobot(slot));
+        if(onInputOscBotChanged) onInputOscBotChanged(slot,display.inputOscBot(slot));
+        if(display.inputEnabled(slot)) mask |= 1u<<slot;
+        if(display.inputType(slot)==4) robotMask |= 1u<<slot;
+        if(display.inputType(slot)==5) oscMask |= 1u<<slot;
+    }
+    if(onInputActivationChanged) onInputActivationChanged(mask,robotMask,oscMask,restartPair);
+}
+
+void TopPanelComponent::activateInputSlot(int slot)
+{
+    if(!juce::isPositiveAndBelow(slot,4)) return;
+    if(display.isInputEditing())
+    { display.selectInputSlot(slot); refreshParameterKnobs(); return; }
+    // JUCE already toggles mouse buttons before onClick. The display owns the
+    // requested state, so keyboard and mouse share this exact operation.
+    display.updateEffect(EffectGroup::input,slot,!display.inputEnabled(slot));
+    publishInputFx();
+}
+
+bool TopPanelComponent::toggleInputPair()
+{
+    if(!display.inputMulti()) return false;
+    const bool enabled=!(display.inputEnabled(0)&&display.inputEnabled(1));
+    display.updateEffect(EffectGroup::input,0,enabled);
+    display.updateEffect(EffectGroup::input,1,enabled);
+    publishInputFx(enabled);
+    return true;
 }

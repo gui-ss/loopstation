@@ -13,6 +13,7 @@ public:
     ~MainComponent() override { stopTimer(); }
     void paint(juce::Graphics&) override;
     void resized() override;
+    void inputFxShortcut(int index) { if(index<4) topPanel.activateInputSlot(index); else topPanel.toggleInputPair(); }
 
 private:
     void timerCallback() override;

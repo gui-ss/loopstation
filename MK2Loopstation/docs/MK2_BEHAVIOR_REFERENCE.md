@@ -189,3 +189,21 @@ Nenhum código de produto, motor de áudio ou interface foi alterado neste estud
 ### Atualização de implementação — etapa 6H
 
 O retrato histórico acima permanece como registro do estudo. Desde 6H, TRACK abre a configuração mínima FX da pista e seleciona o alvo de Undo; não redireciona efeitos. FX por pista habilita a participação nos slots compartilhados. Conforme PG p. 6, INSERT pertence a cada slot: A/LPF e C/DISTORTION agora podem selecionar ALL ou TRACK1–5 independentemente. O editor existente usa ENTER para acessar INSERT e knob 1 para o destino. Não foram implementados bancos/edição completa da 5G, INPUT FX real ou roteamento MAIN/SUB. A ordem interna do hardware em combinações de INSERT individual e ALL continua não confirmada; a topologia adotada, limites, testes e instruções estão em [Etapa 6H da referência técnica](technical-reference.md#etapa-6h-fx-por-pista-e-insert-compartilhado).
+
+
+### Atualização de implementação — etapa 6H.1
+
+ROBOT é agora o primeiro INPUT FX real, selecionável em FX TYPE sem apagar os tipos/valores anteriores. PG p. 36 confirma NOTE C–B, FORMANT -50–+50 e MODE 1/2; o significado antigo/novo dos modos é oficial, mas os algoritmos não são publicados. O protótipo usa uma aproximação de vocoder com dois modos distintos, sem alegar equivalência sonora. INPUT FX processa o microfone antes de monitoramento e captura; FX OFF por pista grava seco, conforme PG p. 2. A reprodução não passa pelo INPUT FX. BPF e demais tipos de entrada anteriores continuam visuais. Consulte [Etapa 6H.1](technical-reference.md#etapa-6h1-input-fx-robot-em-tempo-real) para acesso, mapeamentos internos, validação sintética e limitações. A escuta real de voz/beatbox e a comparação com o hardware continuam pendentes; não há novas observações do vídeo.
+
+### Atualização de implementação — etapa 6H.2
+
+Após relato de chiados nas notas graves, foram reproduzidos excesso de custo em Debug e ondulação dos envelopes de vozes graves. A correção mantém parâmetros e roteamento, reduz cálculos repetidos, suaviza o envelope e trata material não vozeado. Consulte [diagnóstico, comparação técnica, medições e limites](ROBOT_6H2_QUALITY.md). Não foram acrescentadas observações do vídeo nem alegações de equivalência sonora; a escuta da versão corrigida continua necessária.
+
+### Atualização de implementação — etapa 6H.3A
+
+OSC BOT é selecionável nos quatro slots INPUT FX, com os seis parâmetros e padrões oficiais da p.38. Nenhum slot é sobrescrito automaticamente. O microfone excita uma síntese de nota fixa, processada antes do monitoramento/captura; a reprodução não reaplica o efeito. A implementação é uma aproximação de síntese subtrativa com tabelas limitadas em harmônicos. MOD SENS usa modulação de corte pelo envelope como decisão local, pois o manual não publica seu destino/curva. Consulte [acesso, DSP, testes e limitações](OSC_BOT_6H3A.md). Não há novas observações do vídeo nem sequenciamento/presets de músicas.
+
+
+### Atualização de implementação — etapa 6H.3B
+
+FX SEQUENCE controla NOTE de OSC BOT por slot A–D do banco A, com até 16 passos no callback e referência do MusicalClock. O LCD existente edita SW/SYNC/RETRIG/TARGET/RATE/MAX/VAL1–16 e INPUT MODE SINGLE/MULTI. 2MEAS é a duração de cada passo (oito batidas em 4/4). Slots adjacentes de OSC BOT em MULTI têm mistura paralela para conservar as duas vozes. Consulte [FX_SEQUENCE_6H3B.md](FX_SEQUENCE_6H3B.md) para presets de validação, acesso, testes Debug x64 e limitações explícitas: curva RATE numérico local, interpretação de SYNC/RETRIG, prioridade de frase e topologia MULTI não verificadas em hardware. Nenhum preset é carregado automaticamente, e não há novas observações do vídeo ou alegação de fidelidade sonora exata.
