@@ -1,0 +1,16 @@
+Versão do MSBuild 17.14.60+43b635718 para .NET Framework
+
+  Checking File Globs
+  MK2Loopstation_rc_lib.vcxproj -> C:\Users\Guilherme\.codex\.chatgpt-projects\g-p-6acefcd762cc8191ab24d0a1479ca339\MK2Loopstation\build\MK2Loopstation_rc_lib.dir\Debug\MK2Loopstation_rc_lib.lib
+  MK2AudioTests_rc_lib.vcxproj -> C:\Users\Guilherme\.codex\.chatgpt-projects\g-p-6acefcd762cc8191ab24d0a1479ca339\MK2Loopstation\build\MK2AudioTests_rc_lib.dir\Debug\MK2AudioTests_rc_lib.lib
+  MainComponent.cpp
+  MemoryDisplay.cpp
+  TopPanelComponent.cpp
+  AudioSystemTests.cpp
+  TempoPanelTests.cpp
+  Main.cpp
+  MainComponent.cpp
+  MemoryDisplay.cpp
+  TopPanelComponent.cpp
+  MK2Loopstation.vcxproj -> C:\Users\Guilherme\.codex\.chatgpt-projects\g-p-6acefcd762cc8191ab24d0a1479ca339\MK2Loopstation\build\MK2Loopstation_artefacts\Debug\MK2 Loopstation.exe
+  MK2AudioTests.vcxproj -> C:\Users\Guilherme\.codex\.chatgpt-projects\g-p-6acefcd762cc8191ab24d0a1479ca339\MK2Loopstation\build\MK2AudioTests_artefacts\Debug\MK2AudioTests.exe

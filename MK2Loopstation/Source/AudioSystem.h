@@ -7,6 +7,7 @@
 #include "TrackFxRouting.h"
 #include "RobotEffect.h"
 #include "OscBotEffect.h"
+#include "ReverbEffect.h"
 
 // Owns device lifetime independently of the panel and the settings window.
 // Device operations and status snapshots belong to the message thread.
@@ -51,7 +52,9 @@ public:
     { if (juce::isPositiveAndBelow(slot, 4)) inputRobots[size_t(slot)].setParameters(parameters); }
     void setInputOscBot(int slot, OscBotParameters parameters)
     { if (juce::isPositiveAndBelow(slot, 4)) inputOscBots[size_t(slot)].setParameters(parameters); }
-    void setInputSequence(int slot, const FxSequenceParameters& p)
+    void setInputReverb(int slot, ReverbParameters parameters)
+    { if (juce::isPositiveAndBelow(slot, 4)) inputReverbs[size_t(slot)].setParameters(parameters); }
+    void setInputSequence(int slot, FxSequenceParameters p)
     { if (juce::isPositiveAndBelow(slot,4)) inputOscBots[size_t(slot)].setSequence(p); }
     void setTrackEffects(TrackFxParameters value) { trackFx.setParameters(value); }
     void setTrack1Effects(TrackFxParameters value) { setTrackEffects(value); } // Legacy caller; destinations are independent.
@@ -99,6 +102,7 @@ private:
     uint64_t consumedInputActivation=0; // Audio thread only.
     std::array<RobotEffect, 4> inputRobots;
     std::array<OscBotEffect, 4> inputOscBots;
+    std::array<ReverbEffect, 4> inputReverbs;
     int sequenceReference=-1;
     uint64_t previousPhraseEpoch=0;
     std::array<std::array<float, 256>, 2> processedInput {}, captureInput {};

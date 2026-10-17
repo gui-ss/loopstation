@@ -9,7 +9,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 # Keep the small real-time vocoder optimised even in Debug. The rest of the
 # application retains Debug checks/symbols; /RTC instrumentation in this hot
 # translation unit exceeded the audio deadline at low NOTE (6H.2 measurements).
-set_source_files_properties(Source/RobotEffect.cpp Source/OscBotEffect.cpp Source/FxSequence.cpp PROPERTIES COMPILE_OPTIONS
+set_source_files_properties(Source/RobotEffect.cpp Source/OscBotEffect.cpp Source/FxSequence.cpp Source/ReverbEffect.cpp PROPERTIES COMPILE_OPTIONS
     "$<$<CXX_COMPILER_ID:MSVC>:/O2;/Ob2>"
     VS_SETTINGS "BasicRuntimeChecks=Default")
 
@@ -41,6 +41,9 @@ target_sources(MK2Loopstation PRIVATE
     Source/FxSequence.h
     Source/FxSequence.cpp
     Source/OscBotParameters.h
+    Source/ReverbParameters.h
+    Source/ReverbEffect.h
+    Source/ReverbEffect.cpp
     Source/OscBotEffect.h
     Source/OscBotEffect.cpp
     Source/TrackFxParameters.h
@@ -88,6 +91,7 @@ if(MK2_BUILD_AUDIO_TESTS)
     target_sources(MK2AudioTests PRIVATE Tests/AudioSystemTests.cpp Tests/LoopTrackTests.cpp Tests/MusicalClockTests.cpp Source/AudioSystem.cpp Source/LoopTrack.cpp Source/TrackEffects.cpp Source/RobotEffect.cpp Tests/RobotEffectTests.cpp)
     target_sources(MK2AudioTests PRIVATE Tests/RobotQualityTests.cpp)
     target_sources(MK2AudioTests PRIVATE Source/FxSequence.cpp Source/OscBotEffect.cpp Tests/OscBotEffectTests.cpp Tests/FxSequenceTests.cpp)
+    target_sources(MK2AudioTests PRIVATE Source/ReverbEffect.cpp Tests/ReverbEffectTests.cpp)
     target_include_directories(MK2AudioTests PRIVATE Source)
     target_sources(MK2AudioTests PRIVATE Tests/TempoPanelTests.cpp Source/TopPanelComponent.cpp
         Source/MemoryDisplay.cpp Source/PanelControls.cpp Source/VisualStyle.cpp

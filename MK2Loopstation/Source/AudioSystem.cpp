@@ -301,6 +301,7 @@ void AudioSystem::audioDeviceAboutToStart(juce::AudioIODevice* device)
     trackFx.prepare(device->getCurrentSampleRate());
     for (auto& robot : inputRobots) robot.prepare(device->getCurrentSampleRate());
     for (auto& osc : inputOscBots) osc.prepare(device->getCurrentSampleRate());
+    for (auto& reverb : inputReverbs) reverb.prepare(device->getCurrentSampleRate());
     for (int i = 0; i < trackCount; ++i)
     {
         inputFxGate[size_t(i)].reset(device->getCurrentSampleRate(), .02);
@@ -325,6 +326,7 @@ void AudioSystem::audioDeviceStopped()
 {
     for (auto& robot : inputRobots) robot.reset();
     for (auto& osc : inputOscBots) osc.reset();
+    for (auto& reverb : inputReverbs) reverb.reset();
     for (auto& track : tracks) if (track) track->suspend();
     releaseUnusedSync();
     monitoring.store(false, std::memory_order_relaxed);
@@ -364,6 +366,7 @@ void AudioSystem::audioDeviceIOCallbackWithContext(const float* const* inputs, i
     {
         for (auto& robot : inputRobots) robot.reset();
         for (auto& osc : inputOscBots) osc.reset();
+        for (auto& reverb : inputReverbs) reverb.reset();
     }
 }
 
@@ -400,6 +403,7 @@ void AudioSystem::processTracks(const float* const* inputs, int numInputs,
         auto& osc=inputOscBots[slot];
         osc.beginBlock(managed ? int((activation&bit)!=0 && ((activation>>8)&bit)!=0) : -1);
         osc.beginSequenceBlock(timing.beatsPerSample,timing.secondsPerSample);
+        inputReverbs[slot].beginBlock();
         sequenceSync |= osc.sequenceSynced();
     }
     for (int i = 0; i < trackCount; ++i) inputFxGate[size_t(i)].setTargetValue(trackFxEnabled(i) ? 1.f : 0.f);
@@ -455,7 +459,7 @@ void AudioSystem::processTracks(const float* const* inputs, int numInputs,
             {
                 inputRobots[slot].processFrame(l,r);
                 if (!inputOscBots[slot].active())
-                { inputOscBots[slot].processFrame(l,r); ++slot; continue; }
+                { inputOscBots[slot].processFrame(l,r); inputReverbs[slot].processFrame(l,r); ++slot; continue; }
                 size_t end=slot+1;
                 while (end<inputOscBots.size() && inputOscBots[end].active() && !inputRobots[end].active()) ++end;
                 float dl=0,dr=0,weight=0;
@@ -464,7 +468,9 @@ void AudioSystem::processTracks(const float* const* inputs, int numInputs,
                     float vl=l,vr=r; inputOscBots[voice].processFrame(vl,vr);
                     dl+=vl-l; dr+=vr-r; weight+=inputOscBots[voice].wetWeight();
                 }
-                l+=dl/std::max(1.f,weight); r+=dr/std::max(1.f,weight); slot=end;
+                l+=dl/std::max(1.f,weight); r+=dr/std::max(1.f,weight);
+                for (size_t voice=slot;voice<end;++voice) inputReverbs[voice].processFrame(l,r);
+                slot=end;
             }
             processedInput[0][size_t(frame)] = l; processedInput[1][size_t(frame)] = r;
         }

@@ -1,5 +1,5 @@
 #pragma once
-
+#pragma once
 #include "DisplayModel.h"
 #include "DisplaySimulation.h"
 #include <juce_gui_basics/juce_gui_basics.h>
@@ -48,7 +48,19 @@ public:
         value.enabled = model.inputEditor.slots[size_t(slot)].type == 5 && model.inputEffects[size_t(slot)].enabled;
         return value;
     }
-    FxSequenceParameters inputSequence(int slot) const { return model.inputEditor.slots[size_t(slot)].sequence; }
+    ReverbParameters inputReverb(int slot) const
+    {
+        if (! juce::isPositiveAndBelow(slot, 4)) return {};
+        auto value = model.inputEditor.slots[size_t(slot)].reverb;
+        value.enabled = model.inputEditor.slots[size_t(slot)].type == 6 && model.inputEffects[size_t(slot)].enabled;
+        return value;
+    }
+    FxSequenceParameters inputSequence(int slot) const
+    {
+        if (! juce::isPositiveAndBelow(slot, 4)) return {};
+        auto value = model.inputEditor.slots[size_t(slot)].sequence;
+        return value;
+    }
     bool inputMulti() const { return model.inputEditor.multi; }
     int inputType(int slot) const { return model.inputEditor.slots[size_t(slot)].type; }
     bool inputEnabled(int slot) const { return model.inputEffects[size_t(slot)].enabled; }

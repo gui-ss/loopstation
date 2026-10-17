@@ -15,6 +15,7 @@
 void runLoopTrackTests();
 void runRobotEffectTests();
 void runOscBotEffectTests();
+void runReverbEffectTests();
 void runMusicalClockTests();
 void runTempoPanelTests();
 
@@ -1630,9 +1631,12 @@ int main(int argc, char** argv)
         { runRobotQualityTests(argc < 3); return 0; }
         if (argc > 1 && std::string(argv[1]) == "--osc-bot")
         { runOscBotEffectTests(); return 0; }
+        if (argc > 1 && std::string(argv[1]) == "--reverb")
+        { runReverbEffectTests(); return 0; }
         if (argc > 1 && std::string(argv[1]) == "--osc-panel")
         { testOscBotPanel(); return 0; }
         runOscBotEffectTests();
+        runReverbEffectTests();
         runRobotQualityTests(true);
     }
     catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }

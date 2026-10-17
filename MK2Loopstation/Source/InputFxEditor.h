@@ -1,15 +1,17 @@
 #pragma once
+#pragma once
 
 #include <juce_core/juce_core.h>
 #include <array>
 #include "RobotParameters.h"
 #include "OscBotParameters.h"
+#include "ReverbParameters.h"
 #include "FxSequence.h"
 
 // INPUT FX bank A: ROBOT has DSP; earlier types remain visual. Each slot retains its selected type and per-type values.
 struct InputFxEditor
 {
-    inline static constexpr std::array<const char*, 6> types { "LPF", "BPF", "HPF", "PHASER", "ROBOT", "OSC BOT" };
+    inline static constexpr std::array<const char*, 7> types { "LPF", "BPF", "HPF", "PHASER", "ROBOT", "OSC BOT", "REVERB" };
     struct Field
     {
         juce::String name, topLabel, bottomLabel, text;
@@ -23,6 +25,7 @@ struct InputFxEditor
         RobotParameters robot; // Separate storage never overwrites the previous effect values.
         OscBotParameters oscBot;
         FxSequenceParameters sequence;
+        ReverbParameters reverb;
         // RATE, DEPTH, RESONANCE, CUTOFF/MANUAL, STEP RATE, D.LEVEL, E.LEVEL, STAGE.
         // STEP RATE index 0 is OFF; 1..101 means 0..100. RATE remains numeric.
         std::array<std::array<int, 8>, 4> values {{
@@ -50,7 +53,7 @@ struct InputFxEditor
         selectedSlot = index;
         page = 0; // A different type may have fewer pages; always reveal its FX TYPE.
     }
-    int pageCount() const { return selectedType() == 5 ? 8 : selectedType() == 4 ? 1 : selectedType() == 3 ? 3 : 2; }
+    int pageCount() const { return selectedType() == 5 ? 8 : selectedType() == 6 ? 2 : selectedType() == 4 ? 1 : selectedType() == 3 ? 3 : 2; }
     int parameterIndex(int knob) const { return page * 4 + knob - 1; }
     Field field(int knob) const
     {
@@ -58,7 +61,24 @@ struct InputFxEditor
         const auto& slot = slots[static_cast<size_t>(selectedSlot)];
         const int type = slot.type;
         if (page == 0 && knob == 0)
-            return { "FX TYPE", "FX", "TYPE", types[static_cast<size_t>(type)], type, 5, true };
+            return { "FX TYPE", "FX", "TYPE", types[static_cast<size_t>(type)], type, 6, true };
+        if (type == 6)
+        {
+            const auto& p = slot.reverb;
+            const auto cut = [](float hz)
+            { return hz < 1000.f ? juce::String(hz, hz == std::floor(hz) ? 0 : 1) + "Hz" : juce::String(hz / 1000.f, 2) + "k"; };
+            switch (parameterIndex(knob))
+            {
+                case 0: return { "TIME", "TIME", "", juce::String(p.time / 10.0, 1) + "s", p.time, 100, true, 1 };
+                case 1: return { "PRE DELAY", "PRE", "DELAY", juce::String(p.preDelay) + "ms", p.preDelay, 500, true };
+                case 2: return { "DENSITY", "DENSITY", "", juce::String(p.density), p.density, 10, true, 1 };
+                case 3: return { "D.LEVEL", "D.LEVEL", "", juce::String(p.dLevel), p.dLevel, 100, true };
+                case 4: return { "LOW CUT", "LOW", "CUT", p.lowCutFlat() ? juce::String("FLAT") : cut(p.lowCutHz()), p.lowCut, ReverbParameters::cutSteps, true };
+                case 5: return { "HIGH CUT", "HIGH", "CUT", p.highCutFlat() ? juce::String("FLAT") : cut(p.highCutHz()), p.highCut, ReverbParameters::cutSteps, true };
+                case 6: return { "E.LEVEL", "E.LEVEL", "", juce::String(p.eLevel), p.eLevel, 100, true };
+                default: return {};
+            }
+        }
         if (type == 5)
         {
             if (page >= 2)
@@ -131,6 +151,21 @@ struct InputFxEditor
         value = juce::jlimit(item.minimum, item.maximum, value);
         auto& slot = slots[static_cast<size_t>(selectedSlot)];
         if (page == 0 && knob == 0) slot.type = value;
+        else if (slot.type == 6)
+        {
+            auto& p = slot.reverb;
+            switch (parameterIndex(knob))
+            {
+                case 0: p.time = value; break;
+                case 1: p.preDelay = value; break;
+                case 2: p.density = value; break;
+                case 3: p.dLevel = value; break;
+                case 4: p.lowCut = value; break;
+                case 5: p.highCut = value; break;
+                case 6: p.eLevel = value; break;
+                default: break;
+            }
+        }
         else if (slot.type == 4)
         {
             if (knob == 1) slot.robot.note = value;

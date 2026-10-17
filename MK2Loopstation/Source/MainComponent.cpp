@@ -8,7 +8,8 @@ MainComponent::MainComponent(AudioSystem& system) : audio(system)
     topPanel.onInputRobotChanged = [this](int slot, RobotParameters p) { audio.setInputRobot(slot, p); };
     topPanel.onInputSequenceChanged = [this](int slot, FxSequenceParameters p) { audio.setInputSequence(slot,p); };
     topPanel.onInputOscBotChanged = [this](int slot, OscBotParameters p) { audio.setInputOscBot(slot, p); };
-    topPanel.onInputActivationChanged = [this](uint32_t mask,uint32_t robots,uint32_t oscs,bool restart)
+    topPanel.onInputReverbChanged = [this](int slot, ReverbParameters p) { audio.setInputReverb(slot, p); };
+    topPanel.onInputActivationChanged = [this](uint32_t mask, uint32_t robots, uint32_t oscs, bool restart)
     { audio.setInputActivation(mask,robots,oscs,restart); };
     topPanel.publishInputFx();
     topPanel.onTrackFxChanged = [this](TrackFxParameters value) { audio.setTrackEffects(value); };

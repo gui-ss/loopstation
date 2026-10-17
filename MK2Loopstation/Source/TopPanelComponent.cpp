@@ -302,6 +302,7 @@ void TopPanelComponent::publishInputFx(bool restartPair)
         if(onInputSequenceChanged) onInputSequenceChanged(slot,display.inputSequence(slot));
         if(onInputRobotChanged) onInputRobotChanged(slot,display.inputRobot(slot));
         if(onInputOscBotChanged) onInputOscBotChanged(slot,display.inputOscBot(slot));
+        if(onInputReverbChanged) onInputReverbChanged(slot,display.inputReverb(slot));
         if(display.inputEnabled(slot)) mask |= 1u<<slot;
         if(display.inputType(slot)==4) robotMask |= 1u<<slot;
         if(display.inputType(slot)==5) oscMask |= 1u<<slot;

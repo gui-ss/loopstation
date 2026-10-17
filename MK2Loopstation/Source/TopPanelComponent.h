@@ -23,6 +23,7 @@ public:
     std::function<void(int, RobotParameters)> onInputRobotChanged;
     std::function<void(int, OscBotParameters)> onInputOscBotChanged;
     std::function<void(int, FxSequenceParameters)> onInputSequenceChanged;
+    std::function<void(int, ReverbParameters)> onInputReverbChanged;
     std::function<void(uint32_t, uint32_t, uint32_t, bool)> onInputActivationChanged;
     void activateInputSlot(int slot);
     bool toggleInputPair(); // No-op in SINGLE; one publication in MULTI.

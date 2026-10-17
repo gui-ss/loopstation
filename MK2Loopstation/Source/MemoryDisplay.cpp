@@ -186,6 +186,7 @@ void MemoryDisplay::setEditorField(int knob, int value)
     effect.lines = model.inputEditor.selectedType() == 3 ? std::array<juce::String, 2>{ "PHA", "SER" }
                                              : model.inputEditor.selectedType() == 4 ? std::array<juce::String, 2>{ "RO", "BOT" }
                                              : model.inputEditor.selectedType() == 5 ? std::array<juce::String, 2>{ "OSC", "BOT" }
+                                             : model.inputEditor.selectedType() == 6 ? std::array<juce::String, 2>{ "RE", "VERB" }
                                              : std::array<juce::String, 2>{ effect.name, "" };
     updateAccessibleDescription();
     repaint();
