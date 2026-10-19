@@ -38,13 +38,10 @@ MemoryDisplay::MemoryDisplay()
     updateAccessibleDescription();
 }
 
-MemoryDisplay::~MemoryDisplay()
-{
-    stopTimer();
-}
-
 void MemoryDisplay::setTrackSettings(bool open)
 {
+    performanceUntil=0;
+    indicatorEditing=false;
     if (open) { tempoEditing = false; model.inputEditor.open = false; model.trackEditorOpen = false; routingEditing = false; }
     trackSettings = open;
     if (open) quantizeNoticeUntil = 0;
@@ -53,7 +50,8 @@ void MemoryDisplay::setTrackSettings(bool open)
 
 void MemoryDisplay::toggleRoutingEditing()
 {
-    if (! isTrackEditing()) return;
+    performanceUntil=0;
+    if (! isTrackEditing() || (editedSlot()!=0 && editedSlot()!=2)) return;
     routingEditing = ! routingEditing;
     quantizeNoticeUntil = 0;
     updateAccessibleDescription(); repaint();
@@ -66,8 +64,24 @@ void MemoryDisplay::updateRouting(const std::array<bool, 5>& enabled, int a, int
     updateAccessibleDescription(); repaint();
 }
 
+void MemoryDisplay::setIndicatorEditing(bool open)
+{
+    performanceUntil=0;
+    indicatorEditing=open;
+    if(open) setupPage=0;
+    quantizeNoticeUntil=syncNoticeUntil=0;
+    updateAccessibleDescription();repaint();
+}
+
 void MemoryDisplay::navigate(int direction)
 {
+    performanceUntil=0;
+    if(bankSelect[0] || bankSelect[1]) return;
+    if(indicatorEditing)
+    {
+        setupPage=juce::jlimit(0,1,setupPage+(direction>0?1:direction<0?-1:0));
+        updateAccessibleDescription(); repaint(); return;
+    }
     if (tempoEditing) return;
     if (direction == 0 || trackSettings) return;
     if (model.trackEditorOpen)
@@ -97,6 +111,8 @@ void MemoryDisplay::navigate(int direction)
 
 void MemoryDisplay::setInputEditing(bool editing)
 {
+    performanceUntil=0;
+    indicatorEditing=false;
     if (editing) { tempoEditing = false; trackSettings = false; }
     if (editing) model.trackEditorOpen = false;
     if (editing && ! model.inputEditor.open) model.inputEditor.page = 0;
@@ -107,6 +123,8 @@ void MemoryDisplay::setInputEditing(bool editing)
 
 void MemoryDisplay::setTrackEditing(bool editing)
 {
+    performanceUntil=0;
+    indicatorEditing=false;
     if (editing) { tempoEditing = false; trackSettings = false; }
     if (editing) model.inputEditor.open = false;
     model.trackEditorOpen = editing;
@@ -117,6 +135,10 @@ void MemoryDisplay::setTrackEditing(bool editing)
 
 InputFxEditor::Field MemoryDisplay::getEditorField(int knob) const
 {
+    if(bankSelect[0] || bankSelect[1]) return {};
+    if(indicatorEditing && setupPage==1)
+        return knob==0 ? InputFxEditor::Field{"FX KNOB MODE","FX KNOB","MODE",knobMode==FxKnobMode::hook?"HOOK":"IMMEDIATE",int(knobMode),1,true} : InputFxEditor::Field{};
+    if(indicatorEditing) return knob==0 ? InputFxEditor::Field{"INDICATOR","INDICATOR","",indicatorModeName(indicator),int(indicator),2,true} : InputFxEditor::Field{};
     if (tempoEditing)
         return knob == 3 ? InputFxEditor::Field { "BPM", "TEMPO", "", juce::String(model.bpm, 1),
                                                 juce::roundToInt(model.bpm * 10), 3000, true }
@@ -125,8 +147,11 @@ InputFxEditor::Field MemoryDisplay::getEditorField(int knob) const
         return knob == 0 ? InputFxEditor::Field { "FX", "FX", "", selectedFxEnabled() ? "ON" : "OFF",
                                                  selectedFxEnabled() ? 1 : 0, 1, true } : InputFxEditor::Field {};
     if (isRoutingEditing())
-        return knob == 0 ? InputFxEditor::Field { "INSERT", "INSERT", "", insertName(), insertDestination(), 5, true }
-                         : InputFxEditor::Field {};
+    {
+        if(knob==0) return {"INSERT","INSERT","",insertName(),insertDestination(),5,true};
+        if(knob==1) return {"FX TARGET","FX","TARGET",juce::String::charToString(juce::juce_wchar('A'+trackFxTarget)),trackFxTarget,3,true};
+        return {};
+    }
     if (! model.trackEditorOpen) return model.inputEditor.field(knob);
     if (model.trackEditorSlot == 2)
     {
@@ -135,6 +160,7 @@ InputFxEditor::Field MemoryDisplay::getEditorField(int knob) const
         const int values[] { model.trackFx.drive, model.trackFx.tone, model.trackFx.level, model.trackFx.mix };
         return { names[knob], names[knob], "", juce::String(values[knob]), values[knob], 100, true };
     }
+    if (model.trackEditorSlot!=0) return {}; // B/D retain their existing visual types; no new DSP.
     if (knob == 0) return { "CUTOFF", "CUT", "OFF", juce::String(model.trackFx.cutoff), model.trackFx.cutoff, 100, true };
     if (knob == 1) return { "RESONANCE", "RESO-", "NANCE", juce::String(model.trackFx.resonance), model.trackFx.resonance, 100, true };
     return {};
@@ -142,6 +168,7 @@ InputFxEditor::Field MemoryDisplay::getEditorField(int knob) const
 
 void MemoryDisplay::selectInputSlot(int index)
 {
+    performanceUntil=0;
     model.inputEditor.selectSlot(index);
     updateAccessibleDescription();
     repaint();
@@ -149,9 +176,21 @@ void MemoryDisplay::selectInputSlot(int index)
 
 void MemoryDisplay::setEditorField(int knob, int value)
 {
+    performanceUntil=0;
+    if(bankSelect[0] || bankSelect[1]) return;
+    if(indicatorEditing)
+    {
+        if(knob==0)
+        {
+            if(setupPage==0) indicator=IndicatorMode(std::clamp(value,0,2));
+            else knobMode=FxKnobMode(std::clamp(value,0,1));
+        }
+        updateAccessibleDescription();repaint();return;
+    }
     if (tempoEditing) return; // Only AudioSystem may change tempo.
     if (trackSettings || isRoutingEditing())
     {
+        if(isRoutingEditing() && knob==1) trackFxTarget=juce::jlimit(0,3,value);
         if (knob == 0)
         {
             if (trackSettings) trackFxEnabled[size_t(model.currentTrack)] = value != 0;
@@ -166,14 +205,18 @@ void MemoryDisplay::setEditorField(int knob, int value)
             int* fields[] { &model.trackFx.drive, &model.trackFx.tone, &model.trackFx.level, &model.trackFx.mix };
             if (juce::isPositiveAndBelow(knob, 4)) *fields[knob] = TrackFxParameters::bounded(value);
         }
-        else if (knob == 0) model.trackFx.cutoff = TrackFxParameters::bounded(value);
-        else if (knob == 1) model.trackFx.resonance = TrackFxParameters::bounded(value);
+        else if (model.trackEditorSlot == 0 && knob == 0) model.trackFx.cutoff = TrackFxParameters::bounded(value);
+        else if (model.trackEditorSlot == 0 && knob == 1) model.trackFx.resonance = TrackFxParameters::bounded(value);
         updateAccessibleDescription();
         repaint();
         return;
     }
     if (! model.inputEditor.open) return;
+    const int oldBank=model.inputEditor.bank;
+    for(size_t i=0;i<4;++i) inputBankEnabled[size_t(oldBank)][i]=model.inputEffects[i].enabled;
     model.inputEditor.setField(knob, value);
+    if(model.inputEditor.bank!=oldBank)
+        for(size_t i=0;i<4;++i) model.inputEffects[i].enabled=inputBankEnabled[size_t(model.inputEditor.bank)][i];
     if (!model.inputEditor.multi)
     {
         int keep=model.inputEditor.selectedSlot;
@@ -181,13 +224,18 @@ void MemoryDisplay::setEditorField(int knob, int value)
             for(int i=0;i<4;++i) if(model.inputEffects[size_t(i)].enabled) {keep=i; break;}
         for(int i=0;i<4;++i) if(i!=keep) model.inputEffects[size_t(i)].enabled=false;
     }
-    auto& effect = model.inputEffects[static_cast<size_t>(model.inputEditor.selectedSlot)];
-    effect.name = InputFxEditor::types[static_cast<size_t>(model.inputEditor.selectedType())];
-    effect.lines = model.inputEditor.selectedType() == 3 ? std::array<juce::String, 2>{ "PHA", "SER" }
-                                             : model.inputEditor.selectedType() == 4 ? std::array<juce::String, 2>{ "RO", "BOT" }
-                                             : model.inputEditor.selectedType() == 5 ? std::array<juce::String, 2>{ "OSC", "BOT" }
-                                             : model.inputEditor.selectedType() == 6 ? std::array<juce::String, 2>{ "RE", "VERB" }
-                                             : std::array<juce::String, 2>{ effect.name, "" };
+    for(size_t i=0;i<4;++i)
+    {
+        auto& effect=model.inputEffects[i]; const int type=model.inputEditor.slots[i].type;
+        effect.name=InputFxEditor::types[size_t(type)];
+        effect.lines=type==3?std::array<juce::String,2>{"PHA","SER"}
+            :type==4?std::array<juce::String,2>{"RO","BOT"}
+            :type==5?std::array<juce::String,2>{"OSC","BOT"}
+            :type==6?std::array<juce::String,2>{"RE","VERB"}
+            :type==7?std::array<juce::String,2>{"STEP","SLC"}
+            :type==8?std::array<juce::String,2>{"G2B",""}
+            :std::array<juce::String,2>{effect.name,""};
+    }
     updateAccessibleDescription();
     repaint();
 }
@@ -195,19 +243,10 @@ void MemoryDisplay::setEditorField(int knob, int value)
 void MemoryDisplay::updateTrack(int index, TrackVisualState state, bool hasPhrase)
 {
     if (! juce::isPositiveAndBelow(index, static_cast<int>(model.tracks.size()))) return;
-    if (isTimerRunning()) timerCallback();
     auto& track = model.tracks[static_cast<size_t>(index)];
     track.state = state;
     track.hasPhrase = hasPhrase;
     if (state == TrackVisualState::blank) simulation.reset(static_cast<size_t>(index));
-    bool active = false;
-    for (const auto& item : model.tracks) active = active || item.state != TrackVisualState::blank;
-    if (active && ! isTimerRunning())
-    {
-        lastSimulationTime = juce::Time::getMillisecondCounterHiRes();
-        startTimerHz(30);
-    }
-    else if (! active) stopTimer();
     updateAccessibleDescription();
     repaint();
 }
@@ -226,21 +265,13 @@ void MemoryDisplay::updateVolume(int index, float volume)
 {
     if (! juce::isPositiveAndBelow(index, static_cast<int>(model.tracks.size()))) return;
     model.tracks[static_cast<size_t>(index)].volume = juce::jlimit(0.0f, 1.0f, volume);
-    simulation.advance(0.0, model);
     if (model.screen == DisplayModel::Screen::loopLevel) repaint();
-}
-
-void MemoryDisplay::timerCallback()
-{
-    const auto now = juce::Time::getMillisecondCounterHiRes();
-    simulation.advance((now - lastSimulationTime) / 1000.0, model);
-    lastSimulationTime = now;
-    if (! model.inputEditor.open && (model.screen == DisplayModel::Screen::loopTracks || model.screen == DisplayModel::Screen::loopLevel))
-        repaint();
 }
 
 void MemoryDisplay::setTempoEditing(bool editing)
 {
+    performanceUntil=0;
+    indicatorEditing=false;
     tempoEditing = editing;
     updateAccessibleDescription();
     repaint();
@@ -248,6 +279,8 @@ void MemoryDisplay::setTempoEditing(bool editing)
 
 void MemoryDisplay::updateClock(double bpm, const std::array<float, 5>& loopProgress)
 {
+    if(performanceUntil!=0 && juce::Time::getMillisecondCounterHiRes()>=performanceUntil)
+    { performanceUntil=0; updateAccessibleDescription(); repaint(); }
     const bool changed = model.bpm != bpm;
     model.bpm = bpm;
     simulation.updateProgress(loopProgress, model);
@@ -332,7 +365,8 @@ void MemoryDisplay::updateEffect(EffectGroup group, int index, bool enabled)
     effects[static_cast<size_t>(index)].enabled = enabled;
     if (group == EffectGroup::track && index == 0) model.trackFx.enabled = enabled;
     if (group == EffectGroup::track && index == 2) model.trackFx.distortionEnabled = enabled;
-    if (group == EffectGroup::track && (index == 0 || index == 2)) model.trackEditorSlot = index;
+    if (group == EffectGroup::track) model.trackEditorSlot = index;
+    else model.inputEditor.selectedSlot = index;
     updateAccessibleDescription();
     repaint();
 }
@@ -373,7 +407,7 @@ void MemoryDisplay::updateAccessibleDescription()
     if (model.screen == DisplayModel::Screen::loopTracks || model.screen == DisplayModel::Screen::loopLevel)
         description += model.screen == DisplayModel::Screen::loopTracks
             ? " | PROGRESS: TRACKS 1-5 AUDIO"
-            : " | SIMULATED LEVELS";
+            : " | LEVELS: TRACKS 1-5 AUDIO";
     for (const auto group : { EffectGroup::input, EffectGroup::track })
     {
         const auto& effects = group == EffectGroup::input ? model.inputEffects : model.trackEffects;
@@ -384,7 +418,7 @@ void MemoryDisplay::updateAccessibleDescription()
     }
     if (model.inputEditor.open)
     {
-        description = "Display - INPUT FX EDIT | FX A-" + model.inputEditor.slotLetter() + " | "
+        description = "Display - INPUT FX EDIT | FX " + model.inputEditor.bankLetter()+"-" + model.inputEditor.slotLetter() + " | "
                       + juce::String(InputFxEditor::types[static_cast<size_t>(model.inputEditor.selectedType())])
                       + " | PAGE:" + juce::String(model.inputEditor.page + 1)
                       + description.fromFirstOccurrenceOf(" | ", true, false);
@@ -396,8 +430,8 @@ void MemoryDisplay::updateAccessibleDescription()
     }
     if (model.trackEditorOpen)
     {
-        juce::String heading = "Display - TRACK FX EDIT | FX A-" + getTrackSlotLetter()
-            + (model.trackEditorSlot == 2 ? " | DISTORTION" : " | LPF") + " | INSERT:" + insertName();
+        juce::String heading = "Display - TRACK FX EDIT | FX " + trackBankLetter()+"-" + getTrackSlotLetter()
+            + " | " + model.trackEffects[size_t(editedSlot())].name + " | INSERT:" + insertName();
         for (int i = 0; i < 4; ++i)
         {
             const auto field = getEditorField(i);
@@ -417,6 +451,17 @@ void MemoryDisplay::updateAccessibleDescription()
     description += " | LOOP SYNC:" + juce::String(loopSync ? "ON" : "OFF") + " | MODE:MEASURE";
     if (syncNotice.isNotEmpty()) description += " | " + syncNotice;
     if (tempoBlocked) description += " | BPM BLOCKED: synchronized phrases require original tempo; disable LOOP SYNC to edit";
+    if(indicatorEditing) description="Display - SETUP | INDICATOR:"+juce::String(indicatorModeName(indicator))+" | KNOB 1 | EXIT";
+    if(indicatorEditing && setupPage==1) description="Display - SETUP | FX KNOB MODE:"+juce::String(knobMode==FxKnobMode::hook?"HOOK":"IMMEDIATE")+" | KNOB 1 | EXIT";
+    if(performanceUntil!=0)
+    {
+        const auto f=performanceField(performanceGroup);
+        description="Display - "+performanceName(performanceGroup)+" | "+f.name+":"+f.text;
+        if(performanceWaiting) description+=" | HOOK WAIT | PHYSICAL:"+juce::String(performancePhysical)+" | EFFECTIVE:"+juce::String(f.value);
+    }
+    for (const auto group : {EffectGroup::input, EffectGroup::track})
+        if(bankSelecting(group)) description="Display - "+juce::String(group==EffectGroup::input?"INPUT":"TRACK")
+            +" FX BANK SELECT | BANK "+juce::String::charToString(juce::juce_wchar('A'+fxBank(group)))+" | A-D:BANK | EDIT:CONFIRM";
     setTitle(description);
 }
 
@@ -445,12 +490,36 @@ void MemoryDisplay::paint(juce::Graphics& g)
     g.addTransform(juce::AffineTransform::scale(screen.getWidth() / 128.0f, screen.getHeight() / 64.0f)
                        .translated(screen.getX(), screen.getY()));
     paintLcd(g);
-    paintQuantize(g);
-    paintLoopSync(g);
+    if(!bankSelect[0] && !bankSelect[1] && !indicatorEditing && performanceUntil==0) { paintQuantize(g);paintLoopSync(g); }
 }
 
 void MemoryDisplay::paintLcd(juce::Graphics& g)
 {
+    if(bankSelect[0] || bankSelect[1])
+    {
+        const auto group=bankSelect[0]?EffectGroup::input:EffectGroup::track;
+        g.setColour(lcdInk);
+        VisualStyle::lcdText(g,group==EffectGroup::input?"INPUT FX":"TRACK FX",{1,0,126,9},1.f);
+        VisualStyle::lcdText(g,"BANK SELECT",{1,13,126,9},1.f);
+        VisualStyle::lcdText(g,juce::String::charToString(juce::juce_wchar('A'+fxBank(group))),{1,27,126,18},2.f);
+        VisualStyle::lcdText(g,"A-D:BANK EDIT:OK",{1,54,126,8},.8f); return;
+    }
+    if(performanceUntil!=0) { paintPerformanceValue(g); return; }
+    if(indicatorEditing)
+    {
+        g.setColour(lcdInk);
+        VisualStyle::lcdText(g,setupPage==0?"SETUP 1/2":"SETUP 2/2",{2,1,124,9},1.f);
+        juce::Path pageArrow;
+        if(setupPage==0) pageArrow.addTriangle(126,5,122,2,122,8);
+        else pageArrow.addTriangle(2,5,6,2,6,8);
+        g.fillPath(pageArrow);
+        g.fillRect(1,11,126,1);
+        VisualStyle::lcdText(g,setupPage==0?"INDICATOR":"FX KNOB MODE",{2,17,124,10},1.2f);
+        VisualStyle::lcdText(g,setupPage==0?indicatorModeName(indicator):knobMode==FxKnobMode::hook?"HOOK":"IMMEDIATE",{2,33,124,13},1.3f);
+        VisualStyle::lcdText(g,"MODE",{2,55,28,7},.8f);
+        VisualStyle::lcdText(g,"EXIT",{99,55,27,7},.8f);
+        return;
+    }
     if (tempoEditing)
     {
         g.setColour(lcdInk);
@@ -512,11 +581,26 @@ void MemoryDisplay::paintInputEditor(juce::Graphics& g)
     // Owner's Manual p. 16: FX TYPE first, arrows page through four fields at a time.
     const auto& editor = model.inputEditor;
     g.setColour(lcdInk);
-    if (trackSettings || isRoutingEditing())
+    if(isRoutingEditing())
+    {
+        VisualStyle::lcdText(g,"TRACK FX "+trackBankLetter()+"-"+getTrackSlotLetter(),{1,0,126,8},.9f);
+        g.fillRect(1,9,126,1);
+        for(int i=0;i<2;++i)
+        {
+            const auto f=getEditorField(i); const float x=1.f+i*64.f;
+            VisualStyle::lcdText(g,f.name,{x,14,62,9},.8f);
+            VisualStyle::lcdText(g,f.text,{x,29,62,14},1.5f);
+        }
+        VisualStyle::lcdText(g,"INSERT",{1,53,31,8},.75f);
+        VisualStyle::lcdText(g,"TARGET",{33,53,31,8},.75f);
+        VisualStyle::lcdText(g,"EXIT:BACK",{66,53,60,8},.8f);
+        return;
+    }
+    if (trackSettings)
     {
         const auto field = getEditorField(0);
         VisualStyle::lcdText(g, trackSettings ? "TRACK " + juce::String(model.currentTrack + 1) + " SETTINGS"
-                                           : "TRACK FX A-" + getTrackSlotLetter(), { 1, 0, 126, 8 }, .9f);
+                                           : "TRACK FX "+trackBankLetter()+"-" + getTrackSlotLetter(), { 1, 0, 126, 8 }, .9f);
         g.fillRect(1, 9, 126, 1);
         VisualStyle::lcdText(g, field.name, { 1, 14, 126, 9 }, 1.f);
         VisualStyle::lcdText(g, field.text, { 1, 28, 126, 13 }, 1.5f);
@@ -524,17 +608,25 @@ void MemoryDisplay::paintInputEditor(juce::Graphics& g)
         VisualStyle::lcdText(g, "EXIT:BACK", { 60, 53, 66, 8 }, .8f);
         return;
     }
+    if(model.trackEditorOpen && editedSlot()!=0 && editedSlot()!=2)
+    {
+        VisualStyle::lcdText(g,"TRACK FX "+trackBankLetter()+"-"+getTrackSlotLetter(),{1,0,126,8},.9f);
+        g.fillRect(1,9,126,1);
+        VisualStyle::lcdText(g,model.trackEffects[size_t(editedSlot())].name,{1,16,126,10},.9f);
+        VisualStyle::lcdText(g,"NO DSP",{1,32,126,12},1.2f);
+        VisualStyle::lcdText(g,"EXIT:BACK",{1,54,126,8},.8f); return;
+    }
     const bool distortionPage = model.trackEditorOpen && model.trackEditorSlot == 2;
     if (distortionPage)
     {
-        VisualStyle::lcdText(g, "FX A-C DISTORTION", { 1, 0, 94, 8 }, 0.8f);
+        VisualStyle::lcdText(g, "FX "+trackBankLetter()+"-C DISTORTION", { 1, 0, 94, 8 }, 0.8f);
         VisualStyle::lcdText(g, model.trackFx.distortionEnabled ? "ON" : "OFF", { 96, 0, 16, 8 }, 0.7f);
     }
-    else VisualStyle::lcdText(g, model.trackEditorOpen ? "TRACK FX:FX A-A" : "INPUT FX:FX A-" + editor.slotLetter(), { 1, 0, 77, 8 }, 0.8f);
-    if (!model.trackEditorOpen && editor.selectedType()==5 && editor.page>=2)
+    else VisualStyle::lcdText(g, model.trackEditorOpen ? "TRACK FX:FX "+trackBankLetter()+"-A" : "INPUT FX:FX " + editor.bankLetter()+"-"+editor.slotLetter(), { 1, 0, 77, 8 }, 0.8f);
+    if (!model.trackEditorOpen && editor.selectedType()==5 && editor.page>=2 && editor.page<8)
     {
         g.setColour(lcdBackground); g.fillRect(0,0,112,8); g.setColour(lcdInk);
-        VisualStyle::lcdText(g,"FX SEQ:A-"+editor.slotLetter()+" "+juce::String(editor.page-1)+"/6",{1,0,111,8},.8f);
+        VisualStyle::lcdText(g,"FX SEQ:"+editor.bankLetter()+"-"+editor.slotLetter()+" "+juce::String(editor.page-1)+"/6",{1,0,111,8},.8f);
     }
     g.fillRect(1, 9, 126, 1);
     juce::Path arrows;
@@ -656,7 +748,7 @@ void MemoryDisplay::paintEffects(juce::Graphics& g, EffectGroup group)
     const auto& effects = input ? model.inputEffects : model.trackEffects;
     // The suffix A is the reference's fixed bank label, not a selected effect slot.
     g.setColour(lcdInk);
-    VisualStyle::lcdText(g, input ? "INPUT FX-A" : "TRACK FX-A", { 2, 24, 41.3f, 6 }, 0.7f);
+    VisualStyle::lcdText(g, input ? "INPUT FX-"+model.inputEditor.bankLetter() : "TRACK FX-"+trackBankLetter(), { 2, 24, 41.3f, 6 }, 0.7f);
     for (size_t i = 0; i < effects.size(); ++i)
     {
         const auto& effect = effects[i];
@@ -672,4 +764,106 @@ void MemoryDisplay::paintEffects(juce::Graphics& g, EffectGroup group)
             VisualStyle::lcdText(g, effect.lines[1], cell.withY(40).withHeight(8), 1.1f);
         }
     }
+}
+
+int MemoryDisplay::performanceIdentity(EffectGroup group) const
+{
+    const int target=fxTarget(group);
+    return group==EffectGroup::input ? inputBank()*100+target*10+inputType(target) : 1000+activeTrackBank*100+target;
+}
+
+juce::String MemoryDisplay::performanceName(EffectGroup group) const
+{
+    const auto slot=juce::String::charToString(juce::juce_wchar('A'+fxTarget(group)));
+    return group==EffectGroup::input ? "INPUT FX "+model.inputEditor.bankLetter()+"-"+slot
+                                    : "TRACK FX "+trackBankLetter()+"-"+slot;
+}
+
+InputFxEditor::Field MemoryDisplay::performanceField(EffectGroup group) const
+{
+    if(group==EffectGroup::input) return model.inputEditor.performanceField();
+    if(trackFxTarget==0) return {"CUTOFF","CUT","OFF",juce::String(model.trackFx.cutoff),model.trackFx.cutoff,100,true};
+    if(trackFxTarget==2) return {"DRIVE","DRIVE","",juce::String(model.trackFx.drive),model.trackFx.drive,100,true};
+    return {};
+}
+
+void MemoryDisplay::setPerformanceValue(EffectGroup group, int value)
+{
+    if(!performanceField(group).available) return;
+    if(group==EffectGroup::input) model.inputEditor.setPerformanceValue(value);
+    else if(trackFxTarget==0) model.trackFx.cutoff=TrackFxParameters::bounded(value);
+    else if(trackFxTarget==2) model.trackFx.drive=TrackFxParameters::bounded(value);
+    updateAccessibleDescription(); repaint();
+}
+
+void MemoryDisplay::showPerformanceValue(EffectGroup group, bool waiting, double physical)
+{
+    performanceGroup=group; performanceWaiting=waiting;
+    performancePhysical=juce::roundToInt(physical*performanceField(group).maximum);
+    performanceUntil=juce::Time::getMillisecondCounterHiRes()+1800;
+    updateAccessibleDescription(); repaint();
+}
+
+void MemoryDisplay::paintPerformanceValue(juce::Graphics& g)
+{
+    const auto field=performanceField(performanceGroup);
+    const bool input=performanceGroup==EffectGroup::input;
+    const auto type=input ? juce::String(InputFxEditor::types[size_t(inputType(fxTarget(performanceGroup)))])
+                          : fxTarget(performanceGroup)==0?juce::String("LPF"):juce::String("DISTORTION");
+    const bool enabled=input?inputEnabled(fxTarget(performanceGroup))
+                            :fxTarget(performanceGroup)==0?model.trackFx.enabled:model.trackFx.distortionEnabled;
+    g.setColour(lcdInk);
+    VisualStyle::lcdText(g,performanceName(performanceGroup),{1,0,126,8},.9f);
+    g.fillRect(1,9,126,1);
+    VisualStyle::lcdText(g,type+(enabled?" ON":" OFF"),{1,12,126,8},.9f);
+    VisualStyle::lcdText(g,field.name,{1,23,126,8},1.f);
+    VisualStyle::lcdText(g,field.text,{1,34,126,15},1.8f);
+    const auto footer=performanceWaiting ? "HOOK "+juce::String(performancePhysical)+" -> "+juce::String(field.value)
+                                         :knobMode==FxKnobMode::hook?juce::String("HOOK CAPTURED"):juce::String("IMMEDIATE");
+    VisualStyle::lcdText(g,footer,{1,54,126,8},.85f);
+}
+
+void MemoryDisplay::setBankSelecting(EffectGroup group, bool enabled)
+{
+    // One LCD, independent retained bank selection for each section.
+    bankSelect={}; bankSelect[size_t(group)]=enabled;
+    performanceUntil=quantizeNoticeUntil=syncNoticeUntil=0;
+    updateAccessibleDescription(); repaint();
+}
+
+void MemoryDisplay::selectTrackSlot(int index)
+{
+    if(!juce::isPositiveAndBelow(index,4)) return;
+    model.trackEditorSlot=index;
+    if(index!=0 && index!=2) routingEditing=false;
+    performanceUntil=0; updateAccessibleDescription(); repaint();
+}
+
+void MemoryDisplay::selectFxBank(EffectGroup group, int bank)
+{
+    if(!juce::isPositiveAndBelow(bank,4) || fxBank(group)==bank) return;
+    if(group==EffectGroup::input)
+    {
+        for(size_t i=0;i<4;++i) inputBankEnabled[size_t(inputBank())][i]=model.inputEffects[i].enabled;
+        model.inputEditor.selectBank(bank); model.inputEditor.page=0;
+        for(size_t i=0;i<4;++i)
+        {
+            auto& e=model.inputEffects[i]; e.enabled=inputBankEnabled[size_t(bank)][i];
+            e.name=InputFxEditor::types[size_t(inputType(int(i)))];
+            const auto words=juce::StringArray::fromTokens(e.name," ","");
+            e.lines={{words[0],words.size()>1?words[1]:juce::String()}};
+        }
+    }
+    else
+    {
+        auto& old=trackBanks[size_t(activeTrackBank)]; old.parameters=model.trackFx;
+        for(size_t i=0;i<4;++i) old.enabled[i]=model.trackEffects[i].enabled;
+        old.destinations=inserts; old.target=trackFxTarget; old.slot=editedSlot();
+        activeTrackBank=bank; const auto& next=trackBanks[size_t(bank)];
+        model.trackFx=next.parameters; inserts=next.destinations;
+        trackFxTarget=next.target; model.trackEditorSlot=next.slot;
+        for(size_t i=0;i<4;++i) model.trackEffects[i].enabled=next.enabled[i];
+        if(editedSlot()!=0 && editedSlot()!=2) routingEditing=false;
+    }
+    performanceUntil=0; updateAccessibleDescription(); repaint();
 }

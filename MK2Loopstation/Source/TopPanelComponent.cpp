@@ -21,8 +21,27 @@ TopPanelComponent::TopPanelComponent()
         addControl(std::make_unique<PanelKnob>(marker), bounds);
     };
 
-    knob({ 43.0f, 44.0f, 132.0f, 132.0f }, true);
-    knob({ 1025.0f, 44.0f, 132.0f, 132.0f }, true);
+    for(int i=0;i<2;++i)
+    {
+        auto large=std::make_unique<PerformanceFxKnob>();
+        auto* control=large.get(); performanceKnobs[size_t(i)]=control;
+        const auto group=i==0?EffectGroup::input:EffectGroup::track;
+        control->setName(i==0?"INPUT FX KNOB":"TRACK FX KNOB");
+        control->onValueChange=[this,control,group]
+        {
+            refreshPerformanceKnobs();
+            int value=0;
+            if(control->takeMovement(value))
+            {
+                display.setPerformanceValue(group,value);
+                if(group==EffectGroup::input) publishInputFx();
+                else if(onTrackFxChanged) onTrackFxChanged(display.getTrackFx());
+            }
+            refreshParameterKnobs();
+            display.showPerformanceValue(group,control->waiting(),control->getValue());
+        };
+        addControl(std::move(large),{i==0?43.f:1025.f,44.f,132.f,132.f});
+    }
     knob({ 868.0f, 43.0f, 64.0f, 64.0f }, true);
     addAndMakeVisible(display);
     for (int i = 0; i < 4; ++i)
@@ -32,14 +51,12 @@ TopPanelComponent::TopPanelComponent()
         auto* inputFx = button(caption, Style::ledCircle, colour, { 36.0f + i * 55.0f, 189.0f, 42.0f, 42.0f });
         auto* trackFx = button(caption, Style::ledCircle, colour, { 959.0f + i * 55.0f, 189.0f, 42.0f, 42.0f });
         inputFxButtons[static_cast<size_t>(i)] = inputFx;
+        trackFxButtons[size_t(i)]=trackFx;
+        inputFx->setClickingTogglesState(false);
+        trackFx->setClickingTogglesState(false);
         inputFx->setTooltip("INPUT FX " + caption + " (F" + juce::String(6+i) + "); A+B: F10 em MULTI");
         inputFx->onClick = [this, i] { activateInputSlot(i); };
-        trackFx->onClick = [this, trackFx, i]
-        {
-            display.updateEffect(EffectGroup::track, i, trackFx->getToggleState());
-            if ((i == 0 || i == 2) && onTrackFxChanged) onTrackFxChanged(display.getTrackFx());
-            if (display.isTrackEditing()) refreshParameterKnobs();
-        };
+        trackFx->onClick = [this, i] { activateFxSlot(EffectGroup::track,i); };
         auto parameter = std::make_unique<ParameterKnob>();
         auto* control = parameter.get();
         parameterKnobs[static_cast<size_t>(i)] = control;
@@ -47,29 +64,45 @@ TopPanelComponent::TopPanelComponent()
         control->setTitle(control->getName());
         control->onValueChange = [this, control, i]
         {
+            if(display.isIndicatorEditing()) { display.setEditorField(i,juce::roundToInt(control->getValue())); refreshParameterKnobs(); return; }
             if (display.isTempoEditing())
             {
                 if (i == 3 && onBpmChanged) onBpmChanged(control->getValue() * 0.1);
                 return;
             }
-            const bool changesType = display.getEditorField(i).name == "FX TYPE";
             display.setEditorField(i, juce::roundToInt(control->getValue()));
             if (display.isTrackSettings() && onTrackFxEnabled)
                 onTrackFxEnabled(display.selectedTrack(), display.selectedFxEnabled());
-            else if (display.isRoutingEditing() && onTrackInsertChanged)
+            else if (display.isRoutingEditing() && i==0 && onTrackInsertChanged)
                 onTrackInsertChanged(display.editedSlot(), display.insertDestination());
             else if (display.isTrackEditing() && onTrackFxChanged) onTrackFxChanged(display.getTrackFx());
             if (display.isInputEditing()) publishInputFx();
-            if (changesType) refreshParameterKnobs();
+            refreshParameterKnobs();
         };
         addControl(std::move(parameter), { 456.0f + i * 76.0f, 181.0f, 60.0f, 60.0f });
     }
-    inputEditButton = button("", Style::ledCircle, silver, { 203.0f, 120.0f, 36.0f, 36.0f });
+    inputEditButton = button("", Style::ledCircle, silver, { 201.0f, 91.0f, 40.0f, 65.0f });
     inputEditButton->setClickingTogglesState(false);
-    inputEditButton->onClick = [this] { setInputEditing(true); };
-    trackEditButton = button("", Style::ledCircle, silver, { 961.0f, 120.0f, 36.0f, 36.0f });
+    inputEditButton->onClick = [this] { editClick(EffectGroup::input); };
+    trackEditButton = button("", Style::ledCircle, silver, { 959.0f, 91.0f, 40.0f, 65.0f });
     trackEditButton->setClickingTogglesState(false);
-    trackEditButton->onClick = [this] { setTrackEditing(true); };
+    trackEditButton->onClick = [this] { editClick(EffectGroup::track); };
+    for(const auto group : {EffectGroup::input, EffectGroup::track})
+    {
+        auto* edit=group==EffectGroup::input?inputEditButton:trackEditButton;
+        edit->enableEditGesture();
+        edit->setTooltip("Clique: editar; segure 650 ms: bancos A-D; EDIT confirma. No editor, A-D selecionam slots sem alternar ON/OFF. Arraste EDIT ate um slot para editar.");
+        edit->onLongPress=[this,group] { beginBankSelect(group); };
+        edit->onEditDragRelease=[this,group](juce::Point<int> screen)
+        {
+            const auto& buttons=group==EffectGroup::input?inputFxButtons:trackFxButtons;
+            for(int i=0;i<4;++i)
+            {
+                auto* b=buttons[size_t(i)]; const auto p=b->getLocalPoint(nullptr,screen);
+                if(b->hitTest(p.x,p.y)) { activateFxSlot(group,i,true); return; }
+            }
+        };
+    }
     button("ALL\nSTART/STOP", Style::ledPill, green, { 260.0f, 188.0f, 84.0f, 43.0f });
     button("UNDO\nREDO", Style::ledPill, silver, { 352.0f, 188.0f, 84.0f, 43.0f });
     tapButton = button("TAP\nTEMPO", Style::ledPill, green, { 767.0f, 188.0f, 84.0f, 43.0f });
@@ -81,11 +114,17 @@ TopPanelComponent::TopPanelComponent()
         setTempoEditing(true);
     };
     button("START/\nSTOP", Style::ledPill, silver, { 857.0f, 188.0f, 84.0f, 43.0f });
-    button("MENU", Style::utility, silver, { 394.0f, 65.0f, 76.0f, 40.0f });
+    auto* menu=button("MENU", Style::utility, silver, { 394.0f, 65.0f, 76.0f, 40.0f });
+    menu->setClickingTogglesState(false);
+    menu->onClick=[this] { cancelBankSelect(); display.setIndicatorEditing(true); refreshParameterKnobs(); };
     button("LOOP", Style::utility, silver, { 394.0f, 117.0f, 76.0f, 40.0f });
     auto* exitButton = button("EXIT", Style::plainCircle, silver, { 734.0f, 72.0f, 30.0f, 30.0f });
     exitButton->onClick = [this]
     {
+        display.clearPerformanceNotice();
+        if(display.bankSelecting(EffectGroup::input)||display.bankSelecting(EffectGroup::track))
+        { cancelBankSelect(); refreshParameterKnobs(); return; }
+        if(display.isIndicatorEditing()) { display.setIndicatorEditing(false);refreshParameterKnobs();return; }
         if (display.isTempoEditing()) { setTempoEditing(false); return; }
         if (display.isTrackSettings()) { display.setTrackSettings(false); refreshParameterKnobs(); return; }
         if (display.isRoutingEditing()) { display.toggleRoutingEditing(); refreshParameterKnobs(); return; }
@@ -94,7 +133,7 @@ TopPanelComponent::TopPanelComponent()
     };
     auto* enter = button("ENTER", Style::plainCircle, silver, { 795.0f, 72.0f, 30.0f, 30.0f });
     enter->setClickingTogglesState(false);
-    enter->onClick = [this] { display.toggleRoutingEditing(); refreshParameterKnobs(); };
+    enter->onClick = [this] { if(!display.bankSelecting(EffectGroup::input) && !display.bankSelecting(EffectGroup::track) && !display.isIndicatorEditing()) display.toggleRoutingEditing(); refreshParameterKnobs(); };
     button("WRITE", Style::write, silver, { 763.0f, 90.0f, 34.0f, 12.0f });
     auto* previous = button("Previous", Style::plainCircle, silver, { 734.0f, 124.0f, 30.0f, 30.0f });
     auto* next = button("Next", Style::plainCircle, silver, { 795.0f, 124.0f, 30.0f, 30.0f });
@@ -105,49 +144,56 @@ TopPanelComponent::TopPanelComponent()
     previous->onClick = [this] { display.navigate(-1); refreshParameterKnobs(); };
     next->onClick = [this] { display.navigate(1); refreshParameterKnobs(); };
     button("Rhythm edit", Style::plainCircle, silver, { 861.0f, 125.0f, 28.0f, 28.0f });
+    refreshFxButtons();
+    refreshPerformanceKnobs();
 }
 
 void TopPanelComponent::openTrackSettings()
 {
+    cancelBankSelect();
     display.setTrackSettings(true);
     inputEditButton->setToggleState(false, juce::dontSendNotification);
     trackEditButton->setToggleState(false, juce::dontSendNotification);
-    for (auto* button : inputFxButtons) button->setClickingTogglesState(true);
+    for (auto* button : inputFxButtons) button->setClickingTogglesState(false);
     refreshParameterKnobs();
 }
 
 void TopPanelComponent::setInputEditing(bool editing)
 {
+    cancelBankSelect();
     display.setInputEditing(editing);
     trackEditButton->setToggleState(display.isTrackEditing(), juce::dontSendNotification);
     inputEditButton->setToggleState(editing, juce::dontSendNotification);
     // Suppress JUCE's automatic toggle before the click, preserving the real LED state.
-    for (auto* button : inputFxButtons) button->setClickingTogglesState(! editing);
+    for (auto* button : inputFxButtons) button->setClickingTogglesState(false);
     refreshParameterKnobs();
 }
 
 void TopPanelComponent::setTrackEditing(bool editing)
 {
+    cancelBankSelect();
     display.setTrackEditing(editing);
     trackEditButton->setToggleState(editing, juce::dontSendNotification);
     inputEditButton->setToggleState(display.isInputEditing(), juce::dontSendNotification);
-    for (auto* button : inputFxButtons) button->setClickingTogglesState(! display.isInputEditing());
+    for (auto* button : inputFxButtons) button->setClickingTogglesState(false);
     refreshParameterKnobs();
 }
 
 void TopPanelComponent::refreshParameterKnobs()
 {
+    refreshFxButtons();
+    refreshPerformanceKnobs();
     for (size_t i = 0; i < parameterKnobs.size(); ++i)
     {
         auto& control = *parameterKnobs[i];
         const auto field = display.getEditorField(static_cast<int>(i));
-        const bool tempo = display.isTempoEditing();
+        const bool tempo = !display.isIndicatorEditing() && display.isTempoEditing();
         control.setTempoMode(tempo && i == 3);
         control.setRange(tempo && i == 3 ? 400 : field.minimum, juce::jmax(field.minimum+1,field.maximum), 1);
         control.setValue(field.value, juce::dontSendNotification);
-        const bool editing = tempo || display.isInputEditing() || display.isTrackEditing() || display.isTrackSettings();
+        const bool editing = display.isIndicatorEditing() || tempo || display.isInputEditing() || display.isTrackEditing() || display.isTrackSettings();
         control.setEnabled(editing && field.available && field.maximum>field.minimum);
-        control.setTitle(tempo && i == 3 ? "TEMPO BPM - wheel: 1 BPM; Shift+wheel: 0.1 BPM" : editing && field.available ? (display.isTrackSettings() ? "TRACK SETTINGS " : display.isTrackEditing() ? "TRACK FX " + display.getTrackSlotLetter() + " " : "INPUT FX " + display.getInputSlotLetter() + " ") + field.name
+        control.setTitle(display.isIndicatorEditing() && i==0 ? "SETUP "+field.name : tempo && i == 3 ? "TEMPO BPM - wheel: 1 BPM; Shift+wheel: 0.1 BPM" : editing && field.available ? (display.isTrackSettings() ? "TRACK SETTINGS " : display.isTrackEditing() ? "TRACK FX " + display.getTrackSlotLetter() + " " : "INPUT FX " + display.getInputSlotLetter() + " ") + field.name
                          : "Parameter knob " + juce::String(static_cast<int>(i) + 1));
         control.repaint();
     }
@@ -155,8 +201,9 @@ void TopPanelComponent::refreshParameterKnobs()
 
 void TopPanelComponent::setTempoEditing(bool editing)
 {
+    cancelBankSelect();
     display.setTempoEditing(editing);
-    for (auto* b : inputFxButtons) b->setClickingTogglesState(! display.isInputEditing());
+    for (auto* b : inputFxButtons) b->setClickingTogglesState(false);
     inputEditButton->setToggleState(display.isInputEditing(), juce::dontSendNotification);
     trackEditButton->setToggleState(display.isTrackEditing(), juce::dontSendNotification);
     refreshParameterKnobs();
@@ -167,6 +214,7 @@ void TopPanelComponent::updateClock(double bpm, double beats, const std::array<f
     display.updateClock(bpm, loopProgress);
     tapButton->setToggleState(running && beats - std::floor(beats) < 0.16, juce::dontSendNotification);
     if (display.isTempoEditing()) refreshParameterKnobs();
+    else refreshPerformanceKnobs();
 }
 
 void TopPanelComponent::addControl(std::unique_ptr<juce::Component> component,
@@ -295,38 +343,120 @@ void TopPanelComponent::paint(juce::Graphics& g)
 
 void TopPanelComponent::publishInputFx(bool restartPair)
 {
-    uint32_t mask=0, robotMask=0, oscMask=0;
+    uint32_t mask=0, robotMask=0, oscMask=0, slicerMask=0, g2bMask=0;
     for(int slot=0;slot<4;++slot)
     {
         inputFxButtons[size_t(slot)]->setToggleState(display.inputEnabled(slot),juce::dontSendNotification);
         if(onInputSequenceChanged) onInputSequenceChanged(slot,display.inputSequence(slot));
         if(onInputRobotChanged) onInputRobotChanged(slot,display.inputRobot(slot));
         if(onInputOscBotChanged) onInputOscBotChanged(slot,display.inputOscBot(slot));
+        if(onInputStepSlicerChanged) onInputStepSlicerChanged(slot,display.inputStepSlicer(slot));
+        if(display.inputType(slot)==7) slicerMask |= 1u<<slot;
+        if(onInputG2BChanged) onInputG2BChanged(slot,display.inputG2B(slot));
+        if(display.inputType(slot)==8) g2bMask |= 1u<<slot;
         if(onInputReverbChanged) onInputReverbChanged(slot,display.inputReverb(slot));
         if(display.inputEnabled(slot)) mask |= 1u<<slot;
         if(display.inputType(slot)==4) robotMask |= 1u<<slot;
         if(display.inputType(slot)==5) oscMask |= 1u<<slot;
     }
-    if(onInputActivationChanged) onInputActivationChanged(mask,robotMask,oscMask,restartPair);
+    refreshFxButtons();
+    if(onInputBankActivationG2BChanged) onInputBankActivationG2BChanged(mask,robotMask,oscMask,restartPair,display.inputBank(),slicerMask,g2bMask);
+    else if(onInputBankActivationChanged) onInputBankActivationChanged(mask,robotMask,oscMask,restartPair,display.inputBank(),slicerMask);
+    else if(onInputActivationChanged) onInputActivationChanged(mask,robotMask,oscMask,restartPair);
 }
 
 void TopPanelComponent::activateInputSlot(int slot)
 {
+    activateFxSlot(EffectGroup::input,slot);
+}
+
+void TopPanelComponent::cancelBankSelect()
+{
+    if(display.bankSelecting(EffectGroup::input)||display.bankSelecting(EffectGroup::track))
+        display.setBankSelecting(EffectGroup::input,false);
+}
+
+void TopPanelComponent::editClick(EffectGroup group)
+{
+    if(display.bankSelecting(group))
+    {
+        display.setBankSelecting(group,false);
+        refreshParameterKnobs(); return;
+    }
+    if(group==EffectGroup::input) setInputEditing(true); else setTrackEditing(true);
+}
+
+void TopPanelComponent::beginBankSelect(EffectGroup group)
+{
+    if(group==EffectGroup::input) setInputEditing(true); else setTrackEditing(true);
+    display.setBankSelecting(group,true); refreshParameterKnobs();
+}
+
+void TopPanelComponent::activateFxSlot(EffectGroup group, int slot, bool editOnly)
+{
     if(!juce::isPositiveAndBelow(slot,4)) return;
-    if(display.isInputEditing())
-    { display.selectInputSlot(slot); refreshParameterKnobs(); return; }
-    // JUCE already toggles mouse buttons before onClick. The display owns the
-    // requested state, so keyboard and mouse share this exact operation.
-    display.updateEffect(EffectGroup::input,slot,!display.inputEnabled(slot));
-    publishInputFx();
+    const bool input=group==EffectGroup::input;
+    if(display.bankSelecting(group))
+    {
+        display.selectFxBank(group,slot);
+        if(input) publishInputFx();
+        else if(onTrackBankChanged) onTrackBankChanged(display.getTrackFx(),display.trackInsert(0),display.trackInsert(2));
+        refreshParameterKnobs(); return;
+    }
+    if(editOnly || (input?display.isInputEditing():display.isTrackEditing()))
+    {
+        if(editOnly) { if(input) setInputEditing(true); else setTrackEditing(true); }
+        if(input) display.selectInputSlot(slot); else display.selectTrackSlot(slot);
+    }
+    else
+    {
+        display.updateEffect(group,slot,!(input?display.inputEnabled(slot):display.trackEnabled(slot)));
+        if(input) publishInputFx();
+        else if(onTrackFxChanged) onTrackFxChanged(display.getTrackFx());
+    }
+    refreshParameterKnobs();
+}
+
+void TopPanelComponent::refreshFxButtons()
+{
+    using Light=PanelButton::FxLight;
+    for(const auto group : {EffectGroup::input,EffectGroup::track})
+    {
+        const bool input=group==EffectGroup::input;
+        const auto& buttons=input?inputFxButtons:trackFxButtons;
+        const bool editing=input?display.isInputEditing():display.isTrackEditing();
+        const int selected=editing?(input?display.selectedInputSlot():display.editedSlot()):display.fxTarget(group);
+        for(int i=0;i<4;++i)
+        {
+            const bool on=input?display.inputEnabled(i):display.trackEnabled(i);
+            auto* b=buttons[size_t(i)]; b->setToggleState(on,juce::dontSendNotification);
+            b->setFxLight(display.bankSelecting(group)?(display.fxBank(group)==i?Light::blue:Light::off)
+                :!on?Light::off:i==selected?Light::pink:Light::red);
+        }
+    }
+    inputEditButton->setToggleState(display.isInputEditing(),juce::dontSendNotification);
+    trackEditButton->setToggleState(display.isTrackEditing(),juce::dontSendNotification);
 }
 
 bool TopPanelComponent::toggleInputPair()
 {
-    if(!display.inputMulti()) return false;
+    if(display.bankSelecting(EffectGroup::input) || display.bankSelecting(EffectGroup::track) || !display.inputMulti()) return false;
     const bool enabled=!(display.inputEnabled(0)&&display.inputEnabled(1));
     display.updateEffect(EffectGroup::input,0,enabled);
     display.updateEffect(EffectGroup::input,1,enabled);
     publishInputFx(enabled);
     return true;
+}
+
+void TopPanelComponent::refreshPerformanceKnobs()
+{
+    for(int i=0;i<2;++i)
+    {
+        auto& knob=*performanceKnobs[size_t(i)];
+        const auto group=i==0?EffectGroup::input:EffectGroup::track;
+        const auto field=display.performanceField(group);
+        knob.bind(display.performanceIdentity(group),field.value,field.maximum,display.fxKnobMode(),field.available && !display.bankSelecting(EffectGroup::input) && !display.bankSelecting(EffectGroup::track));
+        const auto title=display.performanceName(group)+" "+(field.available?field.name+" "+field.text:juce::String("UNAVAILABLE: NO DSP"));
+        knob.setTitle(title); knob.setTooltip(title+(knob.waiting()?" | HOOK: white=physical; outer tick=effective":""));
+    }
 }

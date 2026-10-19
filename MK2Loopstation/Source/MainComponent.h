@@ -20,6 +20,7 @@ private:
     void requestTrack(int index, LoopTrack::Command);
     void selectTrack(int index);
     AudioSystem& audio;
+    TrackIndicatorFrame indicatorFrame; // Last coherent publication; no visual clock.
     // Coordinates describe the chassis, excluding the white photograph margins.
     static constexpr float panelWidth = 1200.0f;
     static constexpr float panelHeight = 660.0f;

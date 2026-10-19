@@ -31,6 +31,8 @@ public:
     using VisualState = TrackVisualState;
     explicit LedRingButton(int trackNumber);
     void setVisualState(VisualState);
+    void setIndicatorFill(float fill) { if (indicator != fill) { indicator = fill; repaint(); } }
+    float getIndicatorFill() const noexcept { return indicator; }
     VisualState getVisualState() const noexcept { return state; }
     void paintButton(juce::Graphics&, bool, bool) override;
     bool hitTest(int x, int y) override;
@@ -40,6 +42,7 @@ private:
     const int track;
     VisualState state = VisualState::blank;
     bool automaticCycle = true;
+    float indicator = 0;
 };
 
 class VolumeFader final : public juce::Slider

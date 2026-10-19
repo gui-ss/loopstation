@@ -413,3 +413,22 @@ Consulte [OSC_BOT_6H3A.md](OSC_BOT_6H3A.md) para parâmetros e padrões oficiais
 ### Atualização de implementação — etapa 6H.3B
 
 FX SEQUENCE controla NOTE de OSC BOT por slot A–D do banco A, com até 16 passos no callback e referência do MusicalClock. O LCD existente edita SW/SYNC/RETRIG/TARGET/RATE/MAX/VAL1–16 e INPUT MODE SINGLE/MULTI. 2MEAS é a duração de cada passo (oito batidas em 4/4). Slots adjacentes de OSC BOT em MULTI têm mistura paralela para conservar as duas vozes. Consulte [FX_SEQUENCE_6H3B.md](FX_SEQUENCE_6H3B.md) para presets de validação, acesso, testes Debug x64 e limitações explícitas: curva RATE numérico local, interpretação de SYNC/RETRIG, prioridade de frase e topologia MULTI não verificadas em hardware. Nenhum preset é carregado automaticamente, e não há novas observações do vídeo ou alegação de fidelidade sonora exata.
+
+
+### Atualização de implementação — etapa 6H.3D
+
+STEP SLICER é um INPUT FX real, antes de monitoramento/captura, com RATE, MAX, DEPTH, compressão e LENGTH/LEVEL independentes nos 16 passos. O seletor mínimo BANK A–D foi autorizado e acrescentado à última página dos editores; parâmetros, ON/OFF e estados de cada banco/slot são independentes. O painel e os atalhos existentes foram preservados, sem novos LEDs. Consulte [STEP_SLICER_6H3D.md](STEP_SLICER_6H3D.md) para arquitetura, acesso, testes, topologia OSC A/B → SLICER C → REVERB D, aproximações de RATE/compressor e limitações. Não há novas observações do vídeo nem validação auditiva física.
+
+
+## Etapa 6H.4 — indicadores e diagnóstico da gravação
+
+PG p.30 define o anel externo independentemente do botão REC/PLAY/DUB: STATUS (padrão) fica apagado vazio, aceso parado com frase, pisca no tempo em REC/DUB e mostra um compasso em PLAY. LOOP POSITION fica apagado em vazio/STOP/REC e acompanha a posição real em PLAY/DUB. LEVEL fica apagado em vazio/STOP/REC e mede reprodução em PLAY/DUB.
+
+AudioSystem publica `TrackIndicatorFrame` coerente e lock-free no fim de cada callback; MainComponent apenas lê a 30 Hz. Níveis por canal são pós-fader/INSERT individual, pré-bus ALL e pré-monitor, com release de 150 ms. LOOP LEVEL deixou de ser simulado. MENU abre a página mínima SETUP/INDICATOR; knob 1 seleciona modo, EXIT restaura a página anterior. Sem árvore completa de menus ou persistência em disco.
+
+G2B MODE 2 teve correção do alinhamento das duas cabeças/janelas de leitura: extensão de dois períodos e separação de um período de entrada. Reset invalida histórico em O(1). Não foram modificados DSP dos demais efeitos, atalhos F6–F10 nem o armazenamento/duração dos loops. A latência física relatada também sem efeitos **não foi considerada resolvida**; F5 mostra buffer e latências reportadas pelo driver. Diagnóstico, testes, limites e instruções: [TRACK_LEDS_RECORDING_6H4.md](TRACK_LEDS_RECORDING_6H4.md). ATTACK do OSC BOT continua pendente.
+
+
+## Atualização de implementação — etapa 6I
+
+Os dois knobs grandes agora controlam parâmetros reais dos efeitos existentes, por FX TARGET independente de seleção de pista/slot de edição. INPUT mantém alvo por banco A–D; TRACK mantém banco A e processamento A/LPF e C/DISTORTION. MENU/SETUP ganhou a página mínima FX KNOB MODE compartilhada: IMMEDIATE (padrão) e HOOK com captura. As atribuições seguem o pictograma de knob do Parameter Guide, não a estrela de FX SEQUENCE: OSC BOT controla BALANCE; REVERB, E.LEVEL. Limites, uso, arquivos e resultados estão em [FX_KNOBS_6I.md](FX_KNOBS_6I.md). Não foram criados DSP adicionais, alterados LEDs/atalhos nem corrigido ATTACK do OSC BOT.

@@ -3,11 +3,14 @@
 #include <juce_audio_devices/juce_audio_devices.h>
 #include <atomic>
 #include "LoopTrack.h"
+#include "TrackIndicator.h"
 #include "MusicalClock.h"
 #include "TrackFxRouting.h"
 #include "RobotEffect.h"
 #include "OscBotEffect.h"
 #include "ReverbEffect.h"
+#include "StepSlicerEffect.h"
+#include "G2BEffect.h"
 
 // Owns device lifetime independently of the panel and the settings window.
 // Device operations and status snapshots belong to the message thread.
@@ -33,6 +36,7 @@ public:
     bool storageReady() const { return tracks[0] != nullptr; }
     bool commandTrack(int index, LoopTrack::Command);
     LoopTrack::Snapshot trackSnapshot(int index) const;
+    bool readIndicators(TrackIndicatorFrame& frame) const noexcept { return indicators.read(frame); }
     void setTrackVolume(int index, float gain);
     void selectTrack(int index); // Message thread only; never changed by engine updates.
     int selectedTrack() const { return selected; }
@@ -42,20 +46,24 @@ public:
     void setTrack1Volume(float gain) { setTrackVolume(0, gain); }
     // GUI producer: gates, type masks and group-start serial form ONE release
     // publication. Later UI requests may coalesce before the next callback.
-    void setInputActivation(uint32_t mask, uint32_t robotMask, uint32_t oscMask, bool restartPair) noexcept
+    void setInputActivation(uint32_t mask, uint32_t robotMask, uint32_t oscMask, bool restartPair, int bank = 0, uint32_t slicerMask = 0, uint32_t g2bMask = 0) noexcept
     {
         const auto old=inputActivation.load(std::memory_order_relaxed);
-        const auto serial=(old & ~uint64_t(0xffff)) + (restartPair ? uint64_t(1)<<16 : 0);
-        inputActivation.store(serial | 0x1000u | (mask&15u) | ((robotMask&15u)<<4) | ((oscMask&15u)<<8),std::memory_order_release);
+        const auto serial=(old & ~uint64_t(0xffffff)) + (restartPair ? uint64_t(1)<<24 : 0);
+        inputActivation.store(serial | (uint64_t(std::clamp(bank,0,3))<<13) | (uint64_t(slicerMask&15u)<<16) | (uint64_t(g2bMask&15u)<<20) | 0x1000u | (mask&15u) | ((robotMask&15u)<<4) | ((oscMask&15u)<<8),std::memory_order_release);
     }
-    void setInputRobot(int slot, RobotParameters parameters)
-    { if (juce::isPositiveAndBelow(slot, 4)) inputRobots[size_t(slot)].setParameters(parameters); }
-    void setInputOscBot(int slot, OscBotParameters parameters)
-    { if (juce::isPositiveAndBelow(slot, 4)) inputOscBots[size_t(slot)].setParameters(parameters); }
-    void setInputReverb(int slot, ReverbParameters parameters)
-    { if (juce::isPositiveAndBelow(slot, 4)) inputReverbs[size_t(slot)].setParameters(parameters); }
-    void setInputSequence(int slot, FxSequenceParameters p)
-    { if (juce::isPositiveAndBelow(slot,4)) inputOscBots[size_t(slot)].setSequence(p); }
+    void setInputRobot(int slot, RobotParameters parameters, int bank = 0)
+    { if (juce::isPositiveAndBelow(slot, 4) && juce::isPositiveAndBelow(bank,4)) inputBanks[size_t(bank)]->robots[size_t(slot)].setParameters(parameters); }
+    void setInputOscBot(int slot, OscBotParameters parameters, int bank = 0)
+    { if (juce::isPositiveAndBelow(slot, 4) && juce::isPositiveAndBelow(bank,4)) inputBanks[size_t(bank)]->oscs[size_t(slot)].setParameters(parameters); }
+    void setInputReverb(int slot, ReverbParameters parameters, int bank = 0)
+    { if (juce::isPositiveAndBelow(slot, 4) && juce::isPositiveAndBelow(bank,4)) inputBanks[size_t(bank)]->reverbs[size_t(slot)].setParameters(parameters); }
+    void setInputSequence(int slot, FxSequenceParameters p, int bank = 0)
+    { if (juce::isPositiveAndBelow(slot,4) && juce::isPositiveAndBelow(bank,4)) inputBanks[size_t(bank)]->oscs[size_t(slot)].setSequence(p); }
+    void setInputStepSlicer(int slot, StepSlicerParameters p, int bank = 0)
+    { if (juce::isPositiveAndBelow(slot,4) && juce::isPositiveAndBelow(bank,4)) inputBanks[size_t(bank)]->slicers[size_t(slot)].setParameters(p); }
+    void setInputG2B(int slot, G2BParameters p, int bank = 0)
+    { if (juce::isPositiveAndBelow(slot,4) && juce::isPositiveAndBelow(bank,4)) inputBanks[size_t(bank)]->g2bs[size_t(slot)].setParameters(p); }
     void setTrackEffects(TrackFxParameters value) { trackFx.setParameters(value); }
     void setTrack1Effects(TrackFxParameters value) { setTrackEffects(value); } // Legacy caller; destinations are independent.
     void setTrackFxInsert(int slot, int target) { trackFx.setInsert(slot, target); }
@@ -83,6 +91,7 @@ public:
 
 private:
     friend struct AudioSystemTestAccess; // Tests can service zero-frame commands without the device wrapper.
+    void publishIndicators() noexcept;
     void applySelection();
     void releaseUnusedSync() noexcept;
     void updateStatus();
@@ -100,13 +109,25 @@ private:
     std::array<std::unique_ptr<LoopTrack>, trackCount> tracks;
     std::atomic<uint64_t> inputActivation{0};
     uint64_t consumedInputActivation=0; // Audio thread only.
-    std::array<RobotEffect, 4> inputRobots;
-    std::array<OscBotEffect, 4> inputOscBots;
-    std::array<ReverbEffect, 4> inputReverbs;
+    struct InputBank
+    {
+        std::array<RobotEffect,4> robots;
+        std::array<OscBotEffect,4> oscs;
+        std::array<ReverbEffect,4> reverbs;
+        std::array<StepSlicerEffect,4> slicers;
+        std::array<G2BEffect,4> g2bs;
+        uint64_t activation=0; // Audio-thread snapshot, retained while another bank is selected.
+    };
+    std::array<std::unique_ptr<InputBank>,4> inputBanks;
+    int inputBank=0, previousInputBank=0;
+    juce::SmoothedValue<float> inputBankBlend;
     int sequenceReference=-1;
     uint64_t previousPhraseEpoch=0;
     std::array<std::array<float, 256>, 2> processedInput {}, captureInput {};
     std::array<juce::SmoothedValue<float>, 5> inputFxGate;
+    TrackIndicatorMailbox indicators;
+    std::array<std::array<float,2>,5> trackLevels{};
+    float meterRelease=0;
     TrackFxRouting trackFx; // One LPF + one DISTORTION shared by all five tracks.
     static constexpr int routingBlockSize = 256;
     std::array<std::array<std::array<float, routingBlockSize>, 3>, trackCount> playbackScratch {};

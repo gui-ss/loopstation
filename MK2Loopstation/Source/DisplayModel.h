@@ -33,7 +33,7 @@ struct DisplayModel
     Screen screen = Screen::memoryNumber;
     InputFxEditor inputEditor;
     bool trackEditorOpen = false;
-    int trackEditorSlot = 0; // Only A (LPF) and C (DISTORTION) are editable.
+    int trackEditorSlot = 0; // A/C have DSP; B/D remain accessible visual placeholders.
     TrackFxParameters trackFx;
     int memoryNumber = 1;
     juce::String memoryName = "Memory01";

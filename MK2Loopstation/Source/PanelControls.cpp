@@ -6,6 +6,58 @@ PanelKnob::PanelKnob(bool showPositionMarker) : marker(showPositionMarker)
     setInterceptsMouseClicks(false, false);
 }
 
+PerformanceFxKnob::PerformanceFxKnob()
+{
+    setSliderStyle(juce::Slider::RotaryVerticalDrag);
+    setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
+    setRange(0, 1); // Physical position must survive a change of target/range.
+    setValue(0.5, juce::dontSendNotification);
+    setMouseDragSensitivity(400);
+    setScrollWheelEnabled(true);
+    setWantsKeyboardFocus(false);
+    setMouseClickGrabsKeyboardFocus(false);
+    addAndMakeVisible(face);
+}
+
+void PerformanceFxKnob::bind(int identity, int effective, int maximum, FxKnobMode mode, bool available)
+{
+    steps = maximum;
+    pickup.bind(identity, effective, available ? maximum : 0, mode);
+    setEnabled(available);
+    repaint();
+}
+
+void PerformanceFxKnob::resized()
+{
+    juce::Slider::resized();
+    face.setBounds(getLocalBounds());
+}
+
+void PerformanceFxKnob::mouseWheelMove(const juce::MouseEvent&, const juce::MouseWheelDetails& wheel)
+{
+    if (!isEnabled() || wheel.deltaY == 0 || steps <= 0) return;
+    const double direction = (wheel.deltaY > 0 ? 1.0 : -1.0) * (wheel.isReversed ? -1.0 : 1.0);
+    setValue(getValue() + direction / steps, juce::sendNotificationSync);
+}
+
+void PerformanceFxKnob::paintOverChildren(juce::Graphics& g)
+{
+    const auto centre = getLocalBounds().toFloat().getCentre();
+    const float radius = juce::jmin(getWidth(), getHeight()) * 0.30f;
+    const auto mark = [&](double position, float inner, float outer, juce::Colour colour, float width)
+    {
+        const float angle = juce::degreesToRadians(float(-135.0 + position * 270.0));
+        g.setColour(colour);
+        g.drawLine({centre.getPointOnCircumference(radius * inner, angle),
+                    centre.getPointOnCircumference(radius * outer, angle)}, width);
+    };
+    mark(getValue(), .68f, .98f, juce::Colour(0xff080a0d), 4.0f);
+    mark(getValue(), .72f, .94f, juce::Colour(0xffe6eaf0), 2.0f);
+    // Hollow outer tick is the effective value awaiting pickup, not an LED.
+    if (isEnabled() && waiting())
+        mark(effectivePosition(), 1.23f, 1.37f, juce::Colour(0xffb6c8d9), 1.2f);
+}
+
 ParameterKnob::ParameterKnob()
 {
     setSliderStyle(juce::Slider::RotaryVerticalDrag);
@@ -104,6 +156,7 @@ PanelButton::PanelButton(const juce::String& caption, Style buttonStyle, juce::C
 
 bool PanelButton::hitTest(int x, int y)
 {
+    if (expandedEdit) return getLocalBounds().contains(x,y);
     if (style != Style::ledCircle && style != Style::plainCircle)
         return Button::hitTest(x, y);
     return getLocalBounds().toFloat().getCentre().getDistanceFrom(
@@ -113,11 +166,16 @@ bool PanelButton::hitTest(int x, int y)
 
 void PanelButton::paintButton(juce::Graphics& g, bool, bool down)
 {
-    const auto active = getToggleState();
+    const auto active = explicitLight ? light != FxLight::off : getToggleState();
+    const auto colour = !explicitLight ? led : light==FxLight::blue ? juce::Colour(0xff438fff)
+        : light==FxLight::pink ? juce::Colour(0xffff98d7) : juce::Colour(0xffff4057);
     const bool circle = style == Style::ledCircle || style == Style::plainCircle;
     const float width = circle ? 40.0f : (style == Style::write ? 38.0f : 76.0f);
     const float height = style == Style::write ? 14.0f : 40.0f;
-    g.addTransform(juce::AffineTransform::scale(getWidth() / width, getHeight() / height));
+    if (expandedEdit)
+        g.addTransform(juce::AffineTransform::scale(getWidth() * .9f / width, getHeight() * (36.f/65.f) / height)
+                           .translated(getWidth() * .05f, getHeight() * (29.f/65.f)));
+    else g.addTransform(juce::AffineTransform::scale(getWidth() / width, getHeight() / height));
     if (down) g.addTransform(juce::AffineTransform::translation(0, 0.7f));
     const juce::Rectangle<float> bounds(0.0f, 0.0f, width, height);
 
@@ -169,7 +227,7 @@ void PanelButton::paintButton(juce::Graphics& g, bool, bool down)
     g.fillRoundedRectangle(rim, radius);
     if (active)
     {
-        g.setColour(led.withAlpha(style == Style::plainCircle ? 0.35f : 0.18f));
+        g.setColour(colour.withAlpha(style == Style::plainCircle ? 0.35f : 0.18f));
         g.fillRoundedRectangle(rim.reduced(2.0f), radius - 2.0f);
     }
     if (style == Style::plainCircle)
@@ -180,14 +238,14 @@ void PanelButton::paintButton(juce::Graphics& g, bool, bool down)
         {
             juce::Path indicator;
             indicator.addRoundedRectangle(rim, radius);
-            VisualStyle::ledStroke(g, indicator, 2.0f, led, true);
+            VisualStyle::ledStroke(g, indicator, 2.0f, colour, true);
         }
         return;
     }
     juce::Path diffuser;
     diffuser.addRoundedRectangle(rim, radius);
-    VisualStyle::ledStroke(g, diffuser, active ? 4.0f : 3.3f, active ? led : led.darker(0.45f), true);
-    g.setColour(led.interpolatedWith(juce::Colours::white, 0.8f));
+    VisualStyle::ledStroke(g, diffuser, active ? 4.0f : 3.3f, active ? colour : (explicitLight ? juce::Colour(0xff3a3c42) : colour.darker(0.45f)), !explicitLight || active);
+    g.setColour(colour.interpolatedWith(juce::Colours::white, 0.8f));
     auto lines = juce::StringArray::fromLines(getButtonText());
     const auto fontSize = circle ? 24.0f : (lines.size() > 1 ? 11.5f : 12.0f);
     g.setFont(juce::FontOptions("Arial", fontSize, juce::Font::bold));
@@ -202,3 +260,38 @@ void PanelButton::paintButton(juce::Graphics& g, bool, bool down)
     }
 }
 
+
+void PanelButton::setFxLight(FxLight state)
+{
+    if (explicitLight && light==state) return;
+    explicitLight=true; light=state; repaint();
+}
+
+void PanelButton::mouseDown(const juce::MouseEvent& e)
+{
+    if (!onLongPress) { juce::Button::mouseDown(e); return; }
+    if (!e.mods.isLeftButtonDown()) return;
+    held=true; longPress=false; dragged=false; setState(buttonDown); startTimer(650);
+}
+
+void PanelButton::timerCallback()
+{
+    stopTimer();
+    if (held && !dragged && onLongPress) { longPress=true; onLongPress(); }
+}
+
+void PanelButton::mouseDrag(const juce::MouseEvent& e)
+{
+    if (!onLongPress) { juce::Button::mouseDrag(e); return; }
+    if (held && e.getDistanceFromDragStart()>8) { dragged=true; stopTimer(); }
+}
+
+void PanelButton::mouseUp(const juce::MouseEvent& e)
+{
+    if (!onLongPress) { juce::Button::mouseUp(e); return; }
+    stopTimer(); setState(buttonNormal);
+    if (!held) return;
+    held=false;
+    if (dragged && onEditDragRelease) onEditDragRelease(e.getScreenPosition());
+    else if (!longPress && hitTest(e.x,e.y) && onClick) onClick();
+}

@@ -6,12 +6,14 @@
 #include "RobotParameters.h"
 #include "OscBotParameters.h"
 #include "ReverbParameters.h"
+#include "StepSlicerParameters.h"
+#include "G2BParameters.h"
 #include "FxSequence.h"
 
-// INPUT FX bank A: ROBOT has DSP; earlier types remain visual. Each slot retains its selected type and per-type values.
+// INPUT FX A-D banks. Each slot retains its selected type and per-type values in RAM.
 struct InputFxEditor
 {
-    inline static constexpr std::array<const char*, 7> types { "LPF", "BPF", "HPF", "PHASER", "ROBOT", "OSC BOT", "REVERB" };
+    inline static constexpr std::array<const char*, 9> types { "LPF", "BPF", "HPF", "PHASER", "ROBOT", "OSC BOT", "REVERB", "STEP SLICER", "G2B" };
     struct Field
     {
         juce::String name, topLabel, bottomLabel, text;
@@ -26,6 +28,8 @@ struct InputFxEditor
         OscBotParameters oscBot;
         FxSequenceParameters sequence;
         ReverbParameters reverb;
+        StepSlicerParameters slicer;
+        G2BParameters g2b;
         // RATE, DEPTH, RESONANCE, CUTOFF/MANUAL, STEP RATE, D.LEVEL, E.LEVEL, STAGE.
         // STEP RATE index 0 is OFF; 1..101 means 0..100. RATE remains numeric.
         std::array<std::array<int, 8>, 4> values {{
@@ -35,12 +39,24 @@ struct InputFxEditor
     };
     bool open = false;
     bool multi = true; // Preserve the existing simultaneous-slot behaviour.
-    int selectedSlot = 0, page = 0;
+    int selectedSlot = 0, page = 0, bank = 0;
     std::array<Slot, 4> slots;
+    std::array<std::array<Slot,4>,4> savedBanks;
+    std::array<int,4> bankTargets {}; // FX TARGET is independent of the edited slot.
+    std::array<bool,4> bankMulti {{true,true,true,true}};
 
     InputFxEditor()
     {
         for (size_t i = 0; i < slots.size(); ++i) slots[i].type = static_cast<int>(i);
+        for(auto& b:savedBanks) b=slots;
+    }
+    juce::String bankLetter() const { return juce::String::charToString(juce::juce_wchar('A'+bank)); }
+    void selectBank(int index)
+    {
+        if(!juce::isPositiveAndBelow(index,4)||index==bank) return;
+        savedBanks[size_t(bank)]=slots; bankMulti[size_t(bank)]=multi;
+        bank=index; slots=savedBanks[size_t(bank)]; multi=bankMulti[size_t(bank)];
+        page=pageCount()-1;
     }
     int selectedType() const { return slots[static_cast<size_t>(selectedSlot)].type; }
     juce::String slotLetter() const
@@ -53,15 +69,48 @@ struct InputFxEditor
         selectedSlot = index;
         page = 0; // A different type may have fewer pages; always reveal its FX TYPE.
     }
-    int pageCount() const { return selectedType() == 5 ? 8 : selectedType() == 6 ? 2 : selectedType() == 4 ? 1 : selectedType() == 3 ? 3 : 2; }
+    int pageCount() const { return 1+(selectedType()==8?1:selectedType()==7?10:selectedType() == 5 ? 8 : selectedType() == 6 ? 2 : selectedType() == 4 ? 1 : selectedType() == 3 ? 3 : 2); }
     int parameterIndex(int knob) const { return page * 4 + knob - 1; }
     Field field(int knob) const
     {
         if (! juce::isPositiveAndBelow(knob, 4)) return {};
+        if(page==pageCount()-1)
+        {
+            if(knob==0) return {"BANK","BANK","",bankLetter(),bank,3,true};
+            if(knob==1) return {"INPUT MODE","INPUT","MODE",multi?"MULTI":"SINGLE",int(multi),1,true};
+            if(knob==2) return {"FX TARGET","FX","TARGET",juce::String::charToString(juce::juce_wchar('A'+fxTarget())),fxTarget(),3,true};
+            return {};
+        }
         const auto& slot = slots[static_cast<size_t>(selectedSlot)];
         const int type = slot.type;
         if (page == 0 && knob == 0)
-            return { "FX TYPE", "FX", "TYPE", types[static_cast<size_t>(type)], type, 6, true };
+            return { "FX TYPE", "FX", "TYPE", types[static_cast<size_t>(type)], type, 8, true };
+        if(type==8)
+        {
+            if(knob==1) return {"BALANCE","BAL-","ANCE",juce::String(slot.g2b.balance),slot.g2b.balance,100,true};
+            if(knob==2) return {"MODE","MODE","",juce::String(slot.g2b.mode),slot.g2b.mode,2,true,1};
+            return {};
+        }
+        if(type==7)
+        {
+            const auto& p=slot.slicer;
+            if(page==0)
+            {
+                if(knob==1) return {"RATE","RATE","",p.rate<=100?juce::String(p.rate):juce::String(StepSlicerParameters::rateNames[size_t(p.rate-101)]),p.rate,StepSlicerParameters::lastRate,true};
+                if(knob==2) return {"STEP MAX","STEP","MAX",juce::String(p.maximum),p.maximum,16,true,1};
+                if(knob==3) return {"DEPTH","DEPTH","",juce::String(p.depth),p.depth,100,true};
+            }
+            if(page==1)
+            {
+                if(knob==0) return {"COMP THRESHOLD","COMP","THRESH",juce::String(p.threshold)+"dB",p.threshold,0,true,-30};
+                if(knob==1) return {"COMP GAIN","COMP","GAIN","+"+juce::String(p.gain)+"dB",p.gain,20,true};
+                return {};
+            }
+            const int step=(page-2)*2+knob/2;
+            if(!juce::isPositiveAndBelow(step,16)) return {};
+            const bool length=(knob%2)==0; const int v=length?p.length[size_t(step)]:p.level[size_t(step)];
+            return {(length?"LENGTH":"LEVEL")+juce::String(step+1),"STEP"+juce::String(step+1),length?"LENGTH":"LEVEL",juce::String(v),v,100,true,length?1:0};
+        }
         if (type == 6)
         {
             const auto& p = slot.reverb;
@@ -149,8 +198,19 @@ struct InputFxEditor
         const auto item = field(knob);
         if (! item.available) return;
         value = juce::jlimit(item.minimum, item.maximum, value);
+        if(page==pageCount()-1)
+        { if(knob==0) selectBank(value); if(knob==1) multi=value!=0; if(knob==2) bankTargets[size_t(bank)]=value; return; }
         auto& slot = slots[static_cast<size_t>(selectedSlot)];
         if (page == 0 && knob == 0) slot.type = value;
+        else if(slot.type==8)
+        { if(knob==1) slot.g2b.balance=value; if(knob==2) slot.g2b.mode=value; }
+        else if(slot.type==7)
+        {
+            auto& p=slot.slicer;
+            if(page==0) { if(knob==1) p.rate=value; if(knob==2) p.maximum=value; if(knob==3) p.depth=value; }
+            else if(page==1) { if(knob==0) p.threshold=value; if(knob==1) p.gain=value; }
+            else { const auto index=size_t((page-2)*2+knob/2); if(knob%2==0) p.length[index]=value; else p.level[index]=value; }
+        }
         else if (slot.type == 6)
         {
             auto& p = slot.reverb;
@@ -197,6 +257,37 @@ struct InputFxEditor
             }
         }
         else slot.values[static_cast<size_t>(slot.type)][static_cast<size_t>(parameterIndex(knob))] = value;
+    }
+    int fxTarget() const { return bankTargets[size_t(bank)]; }
+    Field performanceField() const
+    {
+        const auto& s=slots[size_t(fxTarget())];
+        // Parameter Guide knob pictogram, NOT the FX SEQUENCE star (pp.34-42).
+        switch(s.type)
+        {
+            case 4: return {"NOTE","NOTE","",RobotParameters::notes[size_t(s.robot.note)],s.robot.note,11,true};
+            case 5: return {"BALANCE","BAL-","ANCE",juce::String(s.oscBot.balance),s.oscBot.balance,100,true};
+            case 6: return {"E.LEVEL","E.LEVEL","",juce::String(s.reverb.eLevel),s.reverb.eLevel,100,true};
+            case 7: return {"DEPTH","DEPTH","",juce::String(s.slicer.depth),s.slicer.depth,100,true};
+            case 8: return {"BALANCE","BAL-","ANCE",juce::String(s.g2b.balance),s.g2b.balance,100,true};
+            default: return {}; // Legacy INPUT filters/PHASER have no DSP; do not pretend otherwise.
+        }
+    }
+    void setPerformanceValue(int value)
+    {
+        const auto field=performanceField();
+        if(!field.available) return;
+        value=juce::jlimit(field.minimum,field.maximum,value);
+        auto& s=slots[size_t(fxTarget())];
+        switch(s.type)
+        {
+            case 4: s.robot.note=value; break;
+            case 5: s.oscBot.balance=value; break;
+            case 6: s.reverb.eLevel=value; break;
+            case 7: s.slicer.depth=value; break;
+            case 8: s.g2b.balance=value; break;
+            default: break;
+        }
     }
     void navigate(int direction) { page = juce::jlimit(0, pageCount() - 1, page + (direction > 0 ? 1 : -1)); }
 };

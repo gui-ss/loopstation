@@ -24,6 +24,7 @@ AudioSystem::AudioSystem() : AudioSystem(std::make_unique<WindowsAudioManager>()
 AudioSystem::AudioSystem(std::unique_ptr<juce::AudioDeviceManager> deviceManager, int capacityFrames)
     : manager(std::move(deviceManager))
 {
+    for (auto& bank : inputBanks) bank=std::make_unique<InputBank>();
     static_assert(maximumAudioBytes < size_t(900) * 1024 * 1024, "Loop RAM budget exceeded");
     try
     {
@@ -279,6 +280,13 @@ void AudioSystem::updateStatus()
         const bool outputOpen = outputName.isNotEmpty() && ! device->getActiveOutputChannels().isZero();
         next = (inputOpen ? juce::String("Microfone conectado. ") : juce::String(L"Microfone não conectado. "))
              + (outputOpen ? juce::String(L"Saída conectada.") : juce::String(L"Saída não conectada."));
+        const double rate=device->getCurrentSampleRate();
+        if(rate>0)
+            next += "\n" + juce::String(rate/1000.,1) + " kHz | Buffer " + juce::String(device->getCurrentBufferSizeSamples())
+                 + " (" + juce::String(1000.*device->getCurrentBufferSizeSamples()/rate,1) + " ms)"
+                 + L"\nLatência informada: entrada " + juce::String(1000.*std::max(0,device->getInputLatencyInSamples())/rate,1)
+                 + L" ms / saída " + juce::String(1000.*std::max(0,device->getOutputLatencyInSamples())/rate,1) + " ms (sem FX).";
+
     }
     else
         next = L"Áudio desconectado. Clique em Reconectar para tentar novamente.";
@@ -299,9 +307,19 @@ void AudioSystem::audioDeviceAboutToStart(juce::AudioIODevice* device)
 {
     clock.prepare(device->getCurrentSampleRate());
     trackFx.prepare(device->getCurrentSampleRate());
-    for (auto& robot : inputRobots) robot.prepare(device->getCurrentSampleRate());
-    for (auto& osc : inputOscBots) osc.prepare(device->getCurrentSampleRate());
-    for (auto& reverb : inputReverbs) reverb.prepare(device->getCurrentSampleRate());
+    trackLevels={};
+    meterRelease=float(std::exp(-1./(.150*device->getCurrentSampleRate())));
+    inputBankBlend.reset(device->getCurrentSampleRate(),.020);
+    inputBankBlend.setCurrentAndTargetValue(1.f);
+    inputBank=previousInputBank=int((inputActivation.load()>>13)&3);
+    for (auto& bank : inputBanks)
+    {
+        for(auto& fx:bank->robots) fx.prepare(device->getCurrentSampleRate());
+        for(auto& fx:bank->oscs) fx.prepare(device->getCurrentSampleRate());
+        for(auto& fx:bank->reverbs) fx.prepare(device->getCurrentSampleRate());
+        for(auto& fx:bank->slicers) fx.prepare(device->getCurrentSampleRate());
+        for(auto& fx:bank->g2bs) fx.prepare(device->getCurrentSampleRate());
+    }
     for (int i = 0; i < trackCount; ++i)
     {
         inputFxGate[size_t(i)].reset(device->getCurrentSampleRate(), .02);
@@ -312,6 +330,7 @@ void AudioSystem::audioDeviceAboutToStart(juce::AudioIODevice* device)
     monitorGain.reset(device->getCurrentSampleRate(), 0.02);
     monitorGain.setCurrentAndTargetValue(0.0f);
     running.store(true);
+    publishIndicators();
 }
 void AudioSystem::releaseUnusedSync() noexcept
 {
@@ -324,13 +343,17 @@ void AudioSystem::releaseUnusedSync() noexcept
 
 void AudioSystem::audioDeviceStopped()
 {
-    for (auto& robot : inputRobots) robot.reset();
-    for (auto& osc : inputOscBots) osc.reset();
-    for (auto& reverb : inputReverbs) reverb.reset();
+    for (auto& bank : inputBanks) for(auto& fx:bank->robots) fx.reset();
+    for (auto& bank : inputBanks) for(auto& fx:bank->oscs) fx.reset();
+    for (auto& bank : inputBanks) for(auto& fx:bank->g2bs) fx.reset();
+    for (auto& bank : inputBanks) for(auto& fx:bank->reverbs) fx.reset();
+    for (auto& bank : inputBanks) for(auto& fx:bank->slicers) fx.reset();
     for (auto& track : tracks) if (track) track->suspend();
     releaseUnusedSync();
     monitoring.store(false, std::memory_order_relaxed);
     running.store(false);
+    trackLevels={};
+    publishIndicators();
 }
 void AudioSystem::audioDeviceError(const juce::String&)
 {
@@ -364,10 +387,28 @@ void AudioSystem::audioDeviceIOCallbackWithContext(const float* const* inputs, i
         processTracks(inputs, numInputs, outputs, numOutputs, numSamples, barFrames);
     else
     {
-        for (auto& robot : inputRobots) robot.reset();
-        for (auto& osc : inputOscBots) osc.reset();
-        for (auto& reverb : inputReverbs) reverb.reset();
+        for (auto& bank : inputBanks) for(auto& fx:bank->robots) fx.reset();
+        for (auto& bank : inputBanks) for(auto& fx:bank->oscs) fx.reset();
+        for (auto& bank : inputBanks) for(auto& fx:bank->g2bs) fx.reset();
+        for (auto& bank : inputBanks) for(auto& fx:bank->reverbs) fx.reset();
+        for (auto& bank : inputBanks) for(auto& fx:bank->slicers) fx.reset();
     }
+    publishIndicators();
+}
+
+void AudioSystem::publishIndicators() noexcept
+{
+    TrackIndicatorFrame frame;
+    frame.beats=clock.position().beats;
+    frame.running=running.load(std::memory_order_relaxed)&&!deviceFailed.load(std::memory_order_relaxed);
+    for(size_t i=0;i<tracks.size();++i)
+    {
+        if(tracks[i]) frame.tracks[i].transport=tracks[i]->snapshot();
+        const auto state=frame.tracks[i].transport.state;
+        if(!frame.running || (state!=LoopTrack::State::playing&&state!=LoopTrack::State::overdubbing)) trackLevels[i]={};
+        frame.tracks[i].level=trackLevels[i];
+    }
+    indicators.publish(frame);
 }
 
 void AudioSystem::tapTempo()
@@ -391,21 +432,65 @@ void AudioSystem::processTracks(const float* const* inputs, int numInputs,
     // Pre-fader playback and smoothed gains stay separate from microphone/monitor.
     trackFx.beginBlock();
     const auto activation=inputActivation.load(std::memory_order_acquire);
-    const bool managed=(activation & 0x1000u)!=0;
-    const bool restartPair=managed && (activation>>16)!=(consumedInputActivation>>16) && (activation&3u)==3u;
-    consumedInputActivation=activation;
-    const auto timing=clock.blockTiming();
-    bool sequenceSync=false;
-    for (size_t slot=0;slot<inputOscBots.size();++slot)
+    const int requestedBank=int((activation>>13)&3);
+    if(requestedBank!=inputBank && !inputBankBlend.isSmoothing())
     {
-        const auto bit=uint64_t(1)<<slot;
-        inputRobots[slot].beginBlock(managed ? int((activation&bit)!=0 && ((activation>>4)&bit)!=0) : -1);
-        auto& osc=inputOscBots[slot];
-        osc.beginBlock(managed ? int((activation&bit)!=0 && ((activation>>8)&bit)!=0) : -1);
-        osc.beginSequenceBlock(timing.beatsPerSample,timing.secondsPerSample);
-        inputReverbs[slot].beginBlock();
-        sequenceSync |= osc.sequenceSynced();
+        previousInputBank=inputBank; inputBank=requestedBank;
+        inputBankBlend.setCurrentAndTargetValue(0); inputBankBlend.setTargetValue(1);
     }
+    const bool restartPair=requestedBank==inputBank && (activation & 0x1000u)!=0 && (activation>>24)!=(consumedInputActivation>>24) && (activation&3u)==3u;
+    if(requestedBank==inputBank) consumedInputActivation=activation;
+    inputBanks[size_t(requestedBank)]->activation=activation;
+    const auto timing=clock.blockTiming();
+    auto& inputOscBots=inputBanks[size_t(inputBank)]->oscs;
+    bool sequenceSync=false;
+    const auto beginBank=[&](int index)
+    {
+        auto& bank=*inputBanks[size_t(index)]; const auto gates=bank.activation;
+        const bool managed=(gates&0x1000u)!=0;
+        for(size_t slot=0;slot<4;++slot)
+        {
+            const auto bit=uint64_t(1)<<slot;
+            bank.robots[slot].beginBlock(managed ? int((gates&bit)!=0 && ((gates>>4)&bit)!=0) : -1);
+            auto& osc=bank.oscs[slot];
+            osc.beginBlock(managed ? int((gates&bit)!=0 && ((gates>>8)&bit)!=0) : -1);
+            osc.beginSequenceBlock(timing.beatsPerSample,timing.secondsPerSample);
+            bank.reverbs[slot].beginBlock();
+            bank.slicers[slot].beginBlock(timing.beatsPerSample,timing.secondsPerSample,
+                managed ? int((gates&bit)!=0 && ((gates>>16)&bit)!=0) : -1);
+            sequenceSync |= osc.sequenceSynced();
+            bank.g2bs[slot].beginBlock(managed ? int((gates&bit)!=0 && ((gates>>20)&bit)!=0) : -1);
+        }
+    };
+    beginBank(inputBank);
+    if(inputBankBlend.isSmoothing()) beginBank(previousInputBank);
+    const auto processBank=[](InputBank& bank,float& l,float& r)
+    {
+        for(size_t slot=0;slot<4;)
+        {
+            bank.robots[slot].processFrame(l,r);
+            bank.g2bs[slot].processFrame(l,r);
+            if(!bank.oscs[slot].active())
+            {
+                bank.oscs[slot].processFrame(l,r);
+                bank.slicers[slot].processFrame(l,r);
+                bank.reverbs[slot].processFrame(l,r); ++slot; continue;
+            }
+            size_t end=slot+1;
+            while(end<4 && bank.oscs[end].active() && !bank.robots[end].active() && !bank.g2bs[end].active()
+                  && !bank.slicers[end-1].active() && !bank.reverbs[end-1].active()) ++end;
+            float dl=0,dr=0,weight=0;
+            for(size_t voice=slot;voice<end;++voice)
+            {
+                float vl=l,vr=r; bank.oscs[voice].processFrame(vl,vr);
+                dl+=vl-l; dr+=vr-r; weight+=bank.oscs[voice].wetWeight();
+            }
+            l+=dl/std::max(1.f,weight); r+=dr/std::max(1.f,weight);
+            for(size_t voice=slot;voice<end;++voice)
+            { bank.slicers[voice].processFrame(l,r); bank.reverbs[voice].processFrame(l,r); }
+            slot=end;
+        }
+    };
     for (int i = 0; i < trackCount; ++i) inputFxGate[size_t(i)].setTargetValue(trackFxEnabled(i) ? 1.f : 0.f);
     bool hasOutput = false;
     for (int ch = 0; outputs != nullptr && ch < numOutputs; ++ch) hasOutput |= outputs[ch] != nullptr;
@@ -418,8 +503,9 @@ void AudioSystem::processTracks(const float* const* inputs, int numInputs,
         const bool haveInput = mic[0] != nullptr || mic[1] != nullptr;
         if (! haveInput)
         {
-            for (auto& robot : inputRobots) robot.reset();
-            for (auto& osc : inputOscBots) osc.reset();
+            for (auto& bank : inputBanks) for(auto& fx:bank->robots) fx.reset();
+            for (auto& bank : inputBanks) for(auto& fx:bank->oscs) fx.reset();
+            for (auto& bank : inputBanks) for(auto& fx:bank->g2bs) fx.reset();
         }
         // Observe transport before INPUT FX, bounded at phrase/REC boundaries.
         int reference=-1;
@@ -452,25 +538,14 @@ void AudioSystem::processTracks(const float* const* inputs, int numInputs,
         {
             float l = mic[0] ? mic[0][frame] : 0.f;
             float r = numInputs == 1 ? l : mic[1] ? mic[1][frame] : 0.f;
-            // Adjacent oscillator voices share an excitation in MULTI, rather
-            // than letting the last BALANCE=100 voice erase the earlier notes.
-            // Convex parallel blend is a local approximation, not BOSS topology.
-            for (size_t slot=0;slot<inputRobots.size();)
+            const float dryL=l,dryR=r;
+            processBank(*inputBanks[size_t(inputBank)],l,r);
+            if(inputBankBlend.isSmoothing())
             {
-                inputRobots[slot].processFrame(l,r);
-                if (!inputOscBots[slot].active())
-                { inputOscBots[slot].processFrame(l,r); inputReverbs[slot].processFrame(l,r); ++slot; continue; }
-                size_t end=slot+1;
-                while (end<inputOscBots.size() && inputOscBots[end].active() && !inputRobots[end].active()) ++end;
-                float dl=0,dr=0,weight=0;
-                for (size_t voice=slot;voice<end;++voice)
-                {
-                    float vl=l,vr=r; inputOscBots[voice].processFrame(vl,vr);
-                    dl+=vl-l; dr+=vr-r; weight+=inputOscBots[voice].wetWeight();
-                }
-                l+=dl/std::max(1.f,weight); r+=dr/std::max(1.f,weight);
-                for (size_t voice=slot;voice<end;++voice) inputReverbs[voice].processFrame(l,r);
-                slot=end;
+                float oldL=dryL,oldR=dryR;
+                processBank(*inputBanks[size_t(previousInputBank)],oldL,oldR);
+                const float blend=inputBankBlend.getNextValue();
+                l=oldL+blend*(l-oldL); r=oldR+blend*(r-oldR);
             }
             processedInput[0][size_t(frame)] = l; processedInput[1][size_t(frame)] = r;
         }
@@ -506,7 +581,10 @@ void AudioSystem::processTracks(const float* const* inputs, int numInputs,
             for (size_t i = 0; i < tracks.size(); ++i)
             { l[i] = playbackScratch[i][0][frame]; r[i] = playbackScratch[i][1][frame]; gains[i] = playbackScratch[i][2][frame]; }
             float left = 0, right = 0;
-            trackFx.processFrame(l, r, left, right, gains);
+            std::array<std::array<float,2>,5> measured{};
+            trackFx.processFrame(l, r, left, right, gains,&measured);
+            for(size_t i=0;i<tracks.size();++i) for(size_t ch=0;ch<2;++ch)
+                trackLevels[i][ch]=std::max(std::isfinite(measured[i][ch])?measured[i][ch]:0.f,trackLevels[i][ch]*meterRelease);
             const float monitor = monitorGain.getNextValue();
             left += processedInput[0][size_t(frame)] * monitor;
             right += processedInput[1][size_t(frame)] * monitor;

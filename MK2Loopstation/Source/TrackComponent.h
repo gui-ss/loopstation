@@ -8,6 +8,7 @@ public:
     explicit TrackComponent(int trackNumber);
     void applyFxEnabled(bool enabled) { fxButton.setToggleState(enabled, juce::dontSendNotification); }
     std::function<void(bool)> onFxChanged;
+    void applyIndicator(float fill) { loopButton.setIndicatorFill(fill); }
     void applyEngineState(TrackVisualState, bool hasPhrase);
     void paint(juce::Graphics&) override;
     void resized() override;

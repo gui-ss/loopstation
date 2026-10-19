@@ -181,7 +181,7 @@ void testEditor()
     InputFxEditor editor; editor.open = true; editor.selectSlot(1); editor.setField(0, 4);
     editor.setField(1, 7); editor.setField(2, -23);
     editor.selectSlot(2); editor.setField(0, 5);
-    check(editor.pageCount() == 8 && editor.field(1).text == "SAW" && editor.field(2).value == 0 && editor.field(3).value == 50,
+    check(editor.pageCount() == 9 && editor.field(1).text == "SAW" && editor.field(2).value == 0 && editor.field(3).value == 50,
         "OSC BOT official page-one defaults");
     editor.setField(1, 4); editor.setField(2, 50); editor.setField(3, 0);
     editor.navigate(1);

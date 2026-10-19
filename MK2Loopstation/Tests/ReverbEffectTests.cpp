@@ -239,7 +239,7 @@ void testEditor()
 {
     InputFxEditor e; e.open = true; e.selectSlot(3);
     e.slots[3].oscBot.note = 55;
-    check(e.field(0).maximum == 6, "FX TYPE includes REVERB");
+    check(e.field(0).maximum == 8, "FX TYPE includes REVERB");
     e.setField(0, 6);
     check(e.selectedType() == 6 && e.field(0).text == "REVERB", "select REVERB");
     check(e.field(1).name == "TIME" && e.field(1).text == "3.0s", "TIME default");
@@ -257,7 +257,7 @@ void testEditor()
     check(r.time == 30 && r.preDelay == 0 && r.density == 4, "page 1 edits");
     check(e.slots[0].reverb.eLevel == 50 && e.slots[0].reverb.density == 5, "slots are independent");
     check(e.slots[3].oscBot.note == 55, "other effect values preserved");
-    check(e.pageCount() == 2, "two pages");
+    check(e.pageCount() == 3, "two effect pages plus BANK");
 }
 
 // A+B OSC BOT mixed as AudioSystem does, then D=REVERB (We Drive Alone scenario).

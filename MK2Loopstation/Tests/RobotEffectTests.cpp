@@ -125,7 +125,7 @@ void testRobotEditor()
     InputFxEditor e; e.open = true; e.selectSlot(1);
     const auto bpf = e.slots[1].values;
     e.setField(0, 4);
-    check(e.pageCount() == 1 && e.field(1).name == "NOTE" && e.field(2).minimum == -50 && e.field(3).minimum == 1,
+    check(e.pageCount() == 2 && e.field(1).name == "NOTE" && e.field(2).minimum == -50 && e.field(3).minimum == 1,
           "ROBOT official parameters/ranges missing");
     e.setField(1, 11); e.setField(2, -50); e.setField(3, 1);
     e.selectSlot(2); e.setField(0, 4); e.setField(2, 50); e.selectSlot(1);

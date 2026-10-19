@@ -5,15 +5,26 @@ MainComponent::MainComponent(AudioSystem& system) : audio(system)
 {
     setOpaque(true);
     addAndMakeVisible(topPanel);
-    topPanel.onInputRobotChanged = [this](int slot, RobotParameters p) { audio.setInputRobot(slot, p); };
-    topPanel.onInputSequenceChanged = [this](int slot, FxSequenceParameters p) { audio.setInputSequence(slot,p); };
-    topPanel.onInputOscBotChanged = [this](int slot, OscBotParameters p) { audio.setInputOscBot(slot, p); };
-    topPanel.onInputReverbChanged = [this](int slot, ReverbParameters p) { audio.setInputReverb(slot, p); };
-    topPanel.onInputActivationChanged = [this](uint32_t mask, uint32_t robots, uint32_t oscs, bool restart)
-    { audio.setInputActivation(mask,robots,oscs,restart); };
+    topPanel.onInputRobotChanged = [this](int slot, RobotParameters p) { audio.setInputRobot(slot, p, topPanel.inputBank()); };
+    topPanel.onInputSequenceChanged = [this](int slot, FxSequenceParameters p) { audio.setInputSequence(slot,p,topPanel.inputBank()); };
+    topPanel.onInputOscBotChanged = [this](int slot, OscBotParameters p) { audio.setInputOscBot(slot, p, topPanel.inputBank()); };
+    topPanel.onInputReverbChanged = [this](int slot, ReverbParameters p) { audio.setInputReverb(slot, p, topPanel.inputBank()); };
+    topPanel.onInputStepSlicerChanged = [this](int slot, StepSlicerParameters p) { audio.setInputStepSlicer(slot,p,topPanel.inputBank()); };
+    topPanel.onInputG2BChanged = [this](int slot, G2BParameters p) { audio.setInputG2B(slot,p,topPanel.inputBank()); };
+    topPanel.onInputBankActivationG2BChanged = [this](uint32_t mask,uint32_t robots,uint32_t oscs,bool restart,int bank,uint32_t slicers,uint32_t g2b)
+    { audio.setInputActivation(mask,robots,oscs,restart,bank,slicers,g2b); };
+    topPanel.onInputBankActivationChanged = [this](uint32_t mask,uint32_t robots,uint32_t oscs,bool restart,int bank,uint32_t slicers)
+    { audio.setInputActivation(mask,robots,oscs,restart,bank,slicers); };
     topPanel.publishInputFx();
     topPanel.onTrackFxChanged = [this](TrackFxParameters value) { audio.setTrackEffects(value); };
     topPanel.onTrackInsertChanged = [this](int slot, int target) { audio.setTrackFxInsert(slot, target); timerCallback(); };
+    topPanel.onTrackBankChanged = [this](TrackFxParameters value, int a, int c)
+    {
+        // Publish the active bank through the existing atomics/processors; refresh
+        // routing only after both destinations have been written.
+        audio.setTrackFxInsert(0,a); audio.setTrackFxInsert(2,c);
+        audio.setTrackEffects(value); timerCallback();
+    };
     topPanel.onTrackFxEnabled = [this](int index, bool enabled) { audio.setTrackFxEnabled(index, enabled); timerCallback(); };
     topPanel.onTapTempo = [this] { audio.tapTempo(); timerCallback(); };
     topPanel.onBpmChanged = [this](double value) { audio.setBpm(value); timerCallback(); };
@@ -53,20 +64,26 @@ TrackVisualState visualState(LoopTrack::State state)
 
 void MainComponent::timerCallback()
 {
+    audio.readIndicators(indicatorFrame);
+    std::array<std::array<float,2>,5> levels{};
     std::array<float, AudioSystem::trackCount> positions {};
     std::array<bool, AudioSystem::trackCount> fxEnabled {};
     for (int i = 0; i < AudioSystem::trackCount; ++i)
     {
-        const auto state = audio.trackSnapshot(i);
+        const auto& reading=indicatorFrame.tracks[size_t(i)];
+        const auto state=reading.transport;
+        tracks[size_t(i)]->applyIndicator(indicatorFill(topPanel.indicatorMode(),reading,indicatorFrame.beats));
+        for(size_t ch=0;ch<2;++ch) levels[size_t(i)][ch]=indicatorLevel(reading.level[ch]);
         tracks[static_cast<size_t>(i)]->applyEngineState(visualState(state.state), state.hasPhrase());
         positions[static_cast<size_t>(i)] = state.progress;
         fxEnabled[size_t(i)] = audio.trackFxEnabled(i);
         tracks[size_t(i)]->applyFxEnabled(fxEnabled[size_t(i)]);
     }
-    const auto selected = audio.trackSnapshot(audio.selectedTrack());
+    const auto selected = indicatorFrame.tracks[size_t(audio.selectedTrack())].transport;
+    topPanel.updateLevels(levels);
     topPanel.selectTrack(audio.selectedTrack());
     topPanel.updateRouting(fxEnabled, audio.trackFxInsert(0), audio.trackFxInsert(2));
-    topPanel.updateClock(audio.bpm(), audio.musicalPosition().beats, positions, audio.clockRunning());
+    topPanel.updateClock(audio.bpm(), indicatorFrame.beats, positions, indicatorFrame.running);
     const bool selectedSync = audio.loopSyncEnabled(audio.selectedTrack());
     topPanel.updateQuantize(audio.quantizeEnabled(), selected.state == LoopTrack::State::recording && ! selectedSync,
                             selected.recordingQuantized, selected.awaitingBoundary && ! selectedSync);

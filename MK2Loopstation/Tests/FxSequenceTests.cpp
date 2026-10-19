@@ -86,7 +86,7 @@ void runFxSequenceTests()
     }
     check(peak>.01f && crossings[1]>crossings[0]*1.9 && crossings[1]<crossings[0]*2.1,"sequence NOTE not changing oscillator pitch");
     InputFxEditor editor;editor.open=true;editor.setField(0,5);
-    check(editor.pageCount()==8,"sequence pages missing");
+    check(editor.pageCount()==9,"sequence pages missing");
     editor.page=2;editor.setField(0,1);editor.setField(1,1);editor.setField(2,1);
     check(editor.field(3).text=="NOTE","sequence TARGET");
     editor.page=3;editor.setField(0,102);editor.setField(1,9);editor.setField(2,1);

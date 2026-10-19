@@ -16,14 +16,18 @@ void runLoopTrackTests();
 void runRobotEffectTests();
 void runOscBotEffectTests();
 void runReverbEffectTests();
+void runG2BEffectTests();
+void runStepSlicerEffectTests();
 void runMusicalClockTests();
 void runTempoPanelTests();
 
 struct AudioSystemTestAccess
 {
+    static int currentBank(const AudioSystem& a) { return a.inputBank; }
+    static double slicerPosition(const AudioSystem& a,int bank,int slot) { return a.inputBanks[size_t(bank)]->slicers[size_t(slot)].position(); }
     static uint64_t consumedInput(const AudioSystem& audio) { return audio.consumedInputActivation; }
-    static bool oscEnabled(const AudioSystem& audio,int slot) { return (audio.inputOscBots[size_t(slot)].applied&1)!=0; }
-    static int sequenceNote(const AudioSystem& audio,int slot) { return audio.inputOscBots[size_t(slot)].soundingNote; }
+    static bool oscEnabled(const AudioSystem& audio,int slot) { return (audio.inputBanks[0]->oscs[size_t(slot)].applied&1)!=0; }
+    static int sequenceNote(const AudioSystem& audio,int slot) { return audio.inputBanks[0]->oscs[size_t(slot)].soundingNote; }
     static MusicalClock::SyncBlock syncBlock(const AudioSystem& audio) { return audio.clock.syncBlock(); }
     static void serviceCommands(AudioSystem& audio, const float* const* inputs, int numInputs,
                                 float* const* outputs, int numOutputs)
@@ -507,6 +511,736 @@ struct FiveTracks
         require(std::abs(right[2000] + .5f * expected) < 1.e-5f, "Stereo routing/independence failed");
     }
 };
+
+
+void testFxBanks6I1()
+{
+    using Group=EffectGroup; using Light=PanelButton::FxLight; using C=LoopTrack::Command;
+    FiveTracks f; MainComponent panel(f.audio); TopPanelComponent* top=nullptr;
+    MemoryDisplay* lcd=nullptr;
+    std::array<PanelButton*,2> edits{};
+    std::array<std::array<PanelButton*,4>,2> slots{};
+    std::array<ParameterKnob*,4> knobs{};
+    PanelButton *exit=nullptr,*enter=nullptr,*next=nullptr,*previous=nullptr;
+    for(auto* child:panel.getChildren()) if(auto* t=dynamic_cast<TopPanelComponent*>(child)) top=t;
+    require(top,"FX panel absent");
+    for(auto* child:top->getChildren())
+    {
+        if(auto* d=dynamic_cast<MemoryDisplay*>(child)) lcd=d;
+        if(auto* k=dynamic_cast<ParameterKnob*>(child))
+            for(int i=0;i<4;++i) if(k->getName()=="Parameter knob "+juce::String(i+1)) knobs[size_t(i)]=k;
+        if(auto* b=dynamic_cast<PanelButton*>(child))
+        {
+            for(int g=0;g<2;++g)
+            {
+                const juce::String prefix=g==0?"INPUT FX ":"TRACK FX ";
+                if(b->getTitle()==prefix+"EDIT") edits[size_t(g)]=b;
+                for(int i=0;i<4;++i) if(b->getTitle()==prefix+juce::String::charToString(char('A'+i))) slots[size_t(g)][size_t(i)]=b;
+            }
+            if(b->getButtonText()=="EXIT") exit=b;
+            if(b->getButtonText()=="ENTER") enter=b;
+            if(b->getButtonText()=="Next") next=b;
+            if(b->getButtonText()=="Previous") previous=b;
+        }
+    }
+    require(lcd && edits[1] && slots[1][3] && knobs[3] && exit && enter && next && previous,"FX bank controls absent");
+    const auto event=[](juce::Component* c,juce::Point<float> p,juce::Point<float> down,bool pressed)
+    {
+        return juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(),p,
+            juce::ModifierKeys(pressed?juce::ModifierKeys::leftButtonModifier:0),1,0,0,0,0,c,c,
+            juce::Time::getCurrentTime(),down,juce::Time::getCurrentTime(),1,false);
+    };
+    const auto shortEdit=[&](int g)
+    {
+        auto* b=edits[size_t(g)]; const juce::Point<float> p(10,5); // printed EDIT label, not only ring
+        b->mouseDown(event(b,p,p,true)); b->mouseUp(event(b,p,p,false));
+    };
+    const auto holdEdit=[&](int g)
+    {
+        auto* b=edits[size_t(g)]; const juce::Point<float> p(10,5);
+        b->mouseDown(event(b,p,p,true));
+        // Service the message-thread timers throughout the hold, as the real event loop does.
+        for(int n=0;n<80;++n) {juce::Thread::sleep(10);juce::Timer::callPendingTimersSynchronously();}
+        require(lcd->bankSelecting(Group(g)),"EDIT long press did not enter BANK SELECT while held");
+        b->mouseUp(event(b,p,p,false));
+        require(lcd->bankSelecting(Group(g)),"EDIT release incorrectly confirmed bank selection");
+        require(lcd->getTitle().contains("BANK SELECT"),"LCD missing bank mode");
+    };
+    const auto chooseBank=[&](int g,int bank)
+    {
+        holdEdit(g); slots[size_t(g)][size_t(bank)]->onClick();
+        require(lcd->fxBank(Group(g))==bank,"physical A-D did not change real bank");
+        for(int i=0;i<4;++i) require(slots[size_t(g)][size_t(i)]->getFxLight()==(i==bank?Light::blue:Light::off),"bank LED not BLUE/OFF");
+        shortEdit(g); require(!lcd->bankSelecting(Group(g)),"EDIT did not confirm");
+    };
+    const auto set=[&](int i,int value){knobs[size_t(i)]->setValue(value,juce::sendNotificationSync);};
+    const auto preview=[&](const char* name)
+    {
+        const auto folder=juce::File::getCurrentWorkingDirectory().getChildFile("tmp"); folder.createDirectory();
+        juce::FileOutputStream out(folder.getChildFile(name)); out.setPosition(0); out.truncate(); juce::PNGImageFormat png;
+        require(png.writeImageToStream(top->createComponentSnapshot(top->getLocalBounds(),true,1.5f),out),"bank preview failed");
+    };
+    // Existing loop continues through navigation and all bank/slot edits.
+    f.mic(.1f); f.command(0,C::primary); f.render(4096); f.command(0,C::primary);
+    for(int bank=0;bank<4;++bank)
+    {
+        chooseBank(0,bank); f.render(256);
+        require(AudioSystemTestAccess::currentBank(f.audio)==bank,"INPUT bank never reached callback");
+        require(lcd->trackBank()==0,"INPUT changed TRACK bank");
+        for(int slot=0;slot<4;++slot)
+        {
+            slots[0][size_t(slot)]->onClick(); set(0,5); // OSC BOT; no DSP changes
+            next->onClick(); set(0,48+bank*4+slot); // NOTE, page 2 knob 1
+            require(lcd->inputOscBot(slot).note==48+bank*4+slot,"INPUT bank-slot NOTE not editable");
+            const auto id=juce::String::charToString(char('A'+bank))+"-"+juce::String::charToString(char('A'+slot));
+            require(lcd->getTitle().contains("FX "+id),"INPUT LCD bank-slot identifier wrong");
+            require(!lcd->inputEnabled(slot),"slot selection enabled effect");
+            // Distinct enabled pattern in each bank, toggled only outside editor.
+            exit->onClick(); if(slot<=bank) slots[0][size_t(slot)]->onClick(); shortEdit(0);
+            slots[0][size_t(slot)]->onClick();
+        }
+        f.render(256); require(f.audio.trackSnapshot(0).frames==4096 && f.audio.trackSnapshot(0).state==LoopTrack::State::playing,"bank navigation disturbed loop");
+    }
+    for(int bank=0;bank<4;++bank)
+    {
+        chooseBank(0,bank);
+        for(int i=0;i<4;++i)
+        {
+            slots[0][size_t(i)]->onClick();
+            require(lcd->inputOscBot(i).note==48+bank*4+i,"INPUT 16-slot values not independent");
+            require(lcd->inputEnabled(i)==(i<=bank),"INPUT bank ON/OFF lost");
+            require(slots[0][size_t(i)]->getFxLight()==(i<=bank?Light::pink:Light::off),"selected slot light not PINK/OFF");
+        }
+    }
+    preview("fx-bank-input-dd-6i1.png");
+    const int inputBank=lcd->inputBank();
+    // TRACK uses the existing A/LPF and C/DIST processors with separate saved bank values.
+    for(int bank=0;bank<4;++bank)
+    {
+        chooseBank(1,bank); require(lcd->inputBank()==inputBank,"TRACK changed INPUT bank");
+        for(int slot=0;slot<4;++slot)
+        {
+            slots[1][size_t(slot)]->onClick();
+            const auto id=juce::String::charToString(char('A'+bank))+"-"+juce::String::charToString(char('A'+slot));
+            require(lcd->getTitle().contains("FX "+id),"TRACK LCD hides B/D or wrong bank");
+            if(slot==0 || slot==2)
+            {
+                set(0,20+bank*13+slot); enter->onClick(); set(0,(bank+slot)%6); set(1,bank); exit->onClick();
+            }
+            else require(!knobs[0]->isEnabled(),"visual TRACK placeholder edits unrelated LPF");
+            exit->onClick(); if(slot<=bank) slots[1][size_t(slot)]->onClick(); shortEdit(1);
+        }
+        f.render(8192);
+        require(f.audio.trackFxInsert(0)==bank && f.audio.trackFxInsert(2)==(bank+2)%6,"TRACK bank INSERT publication lost");
+    }
+    for(int bank=0;bank<4;++bank)
+    {
+        chooseBank(1,bank); f.render(8192);
+        require(lcd->getTrackFx().cutoff==20+bank*13 && lcd->getTrackFx().drive==22+bank*13,"TRACK bank parameters lost");
+        require(lcd->fxTarget(Group::track)==bank,"TRACK bank FX TARGET lost");
+        require(f.audio.trackFxInsert(0)==bank && f.audio.trackFxInsert(2)==(bank+2)%6,"restored bank not routed");
+        for(int i=0;i<4;++i)
+        {
+            slots[1][size_t(i)]->onClick();
+            require(lcd->trackEnabled(i)==(i<=bank),"TRACK bank-slot ON/OFF lost");
+            require(slots[1][size_t(i)]->getFxLight()==(i<=bank?Light::pink:Light::off),"TRACK selected state not PINK/OFF");
+        }
+    }
+    preview("fx-bank-track-dd-6i1.png");
+    holdEdit(1); preview("fx-bank-blue-6i1.png"); shortEdit(1);
+    slots[1][0]->onClick(); require(slots[1][0]->getFxLight()==Light::pink && slots[1][2]->getFxLight()==Light::red,"RED/PINK selection confused");
+    preview("fx-bank-red-pink-6i1.png");
+    // Single mouse EDIT-drag-release selects a slot before the long-press threshold.
+    exit->onClick(); auto* edit=edits[1]; const juce::Point<float> down(10,5);
+    auto destination=edit->getLocalPoint(slots[1][2],slots[1][2]->getLocalBounds().getCentre()).toFloat();
+    const bool enabled=lcd->trackEnabled(2);
+    edit->mouseDown(event(edit,down,down,true)); edit->mouseDrag(event(edit,destination,down,true)); edit->mouseUp(event(edit,destination,down,false));
+    require(lcd->isTrackEditing() && lcd->editedSlot()==2 && lcd->trackEnabled(2)==enabled,"captured EDIT drag did not select without toggling");
+    // A cancelled press neither opens editor nor leaves a timer armed.
+    exit->onClick(); edit->mouseDown(event(edit,down,down,true)); edit->mouseDrag(event(edit,{-30,-30},down,true)); edit->mouseUp(event(edit,{-30,-30},down,false));
+    require(!lcd->isTrackEditing() && !lcd->bankSelecting(Group::track),"cancelled EDIT opened modal");
+    // Real bank change changes audio through the existing TRACK DSP, not just LEDs.
+    chooseBank(0,0); exit->onClick();
+    for(int i=0;i<4;++i) if(lcd->inputEnabled(i)) slots[0][size_t(i)]->onClick();
+    f.stopAll(); f.command(0,C::clear);
+    for(size_t n=0;n<4096;++n) f.inputL[n]=f.inputR[n]=.15f*std::sin(float(n)*juce::MathConstants<float>::twoPi/8);
+    f.command(0,C::primary); f.render(4096); f.command(0,C::primary); f.mic(0);
+    const auto configure=[&](int bank,int cutoff,bool distort)
+    {
+        chooseBank(1,bank); slots[1][0]->onClick(); set(0,cutoff); enter->onClick(); set(0,1); exit->onClick();
+        slots[1][2]->onClick(); set(0,80); enter->onClick(); set(0,1); exit->onClick(); exit->onClick();
+        if(!lcd->trackEnabled(0)) slots[1][0]->onClick();
+        if(lcd->trackEnabled(2)!=distort) slots[1][2]->onClick();
+    };
+    configure(0,0,false); configure(1,100,false); configure(2,100,true);
+    std::array<std::array<float,4096>,3> sound{};
+    for(int bank=0;bank<3;++bank) {chooseBank(1,bank);f.render(24000);sound[size_t(bank)]=f.left;}
+    double low=0,high=0,delta=0;
+    for(size_t n=0;n<4096;++n) {low+=sound[0][n]*sound[0][n];high+=sound[1][n]*sound[1][n];delta+=std::abs(sound[2][n]-sound[1][n]);}
+    require(high>.1 && low<high*.01 && delta>1,"TRACK bank switch did not restore real LPF/DIST processing");
+    require(f.audio.trackSnapshot(0).frames==4096 && f.audio.trackSnapshot(0).state==LoopTrack::State::playing,"bank switching changed recorded phrase");
+    std::cout<<"PASS 6I.1: mouse EDIT short/hold/drag/cancel, 16 slots per section, independent banks/values/ON-OFF/INSERT/FX TARGET, OFF/RED/PINK/BLUE, LCD IDs, loop continuity and real LPF/DIST bank audio\n";
+}
+
+// Stage 6I: operate the actual panel callbacks and the existing production audio path.
+void testFxKnobs6I()
+{
+    using Group=EffectGroup;
+    using Mode=FxKnobMode;
+    using C=LoopTrack::Command;
+    int value=0;
+    FxKnobPickup pickup;
+    pickup.bind(0,80,100,Mode::hook);
+    require(!pickup.move(.2,value) && !pickup.move(.79,value),"HOOK wrote before pickup");
+    require(pickup.move(.81,value) && value==81,"HOOK failed upward crossing");
+    pickup.bind(0,81,100,Mode::hook);
+    require(pickup.move(.7,value) && value==70,"HOOK lost its own capture");
+    pickup.bind(0,20,100,Mode::hook);
+    require(!pickup.move(.3,value) && pickup.move(.19,value),"external edit/downward pickup");
+    pickup.bind(100,80,100,Mode::hook);
+    require(!pickup.move(.2,value),"new bank retained capture");
+    pickup.bind(101,80,100,Mode::immediate);
+    require(pickup.move(.21,value) && value==21,"IMMEDIATE failed to apply physical position");
+    pickup.bind(102,11,11,Mode::hook);
+    require(!pickup.move(.5,value) && pickup.move(1,value) && value==11,"discrete pickup/range");
+    require(!pickup.move(1,value),"stationary knob wrote a parameter");
+
+    FiveTracks f; MainComponent panel(f.audio);
+    TopPanelComponent* top=nullptr; MemoryDisplay* display=nullptr;
+    std::array<ParameterKnob*,4> small{};
+    PerformanceFxKnob *input=nullptr,*track=nullptr;
+    juce::Button *edit=nullptr,*trackEdit=nullptr,*next=nullptr,*back=nullptr,*exit=nullptr,*menu=nullptr,*enter=nullptr;
+    std::array<juce::Button*,4> trackButtons{};
+    for(auto* c:panel.getChildren()) if(auto* t=dynamic_cast<TopPanelComponent*>(c)) top=t;
+    require(top!=nullptr,"6I top panel missing");
+    for(auto* c:top->getChildren())
+    {
+        if(auto* d=dynamic_cast<MemoryDisplay*>(c)) display=d;
+        if(auto* k=dynamic_cast<ParameterKnob*>(c))
+            for(int i=0;i<4;++i) if(k->getName()=="Parameter knob "+juce::String(i+1)) small[size_t(i)]=k;
+        if(auto* k=dynamic_cast<PerformanceFxKnob*>(c))
+        {if(k->getName()=="INPUT FX KNOB") input=k; else if(k->getName()=="TRACK FX KNOB") track=k;}
+        if(auto* b=dynamic_cast<juce::Button*>(c))
+        {
+            if(b->getTitle()=="INPUT FX EDIT") edit=b;
+            if(b->getTitle()=="TRACK FX EDIT") trackEdit=b;
+            if(b->getButtonText()=="Next") next=b;
+            if(b->getButtonText()=="Previous") back=b;
+            if(b->getButtonText()=="EXIT") exit=b;
+            if(b->getButtonText()=="MENU") menu=b;
+            if(b->getButtonText()=="ENTER") enter=b;
+            for(int i=0;i<4;++i) if(b->getTitle()=="TRACK FX "+juce::String::charToString(char('A'+i))) trackButtons[size_t(i)]=b;
+        }
+    }
+    require(display&&small[3]&&input&&track&&edit&&trackEdit&&next&&back&&exit&&menu&&enter&&trackButtons[3],"6I controls missing");
+    const auto set=[&](int knob,int v){small[size_t(knob)]->setValue(v,juce::sendNotificationSync);};
+    const auto first=[&]{for(int i=0;i<12;++i)back->onClick();};
+    const auto last=[&]{for(int i=0;i<12;++i)next->onClick();};
+    const auto move=[](PerformanceFxKnob* k,double v){k->setValue(v,juce::sendNotificationSync);};
+    const auto screenshot=[&](const char* name,juce::Component& c,float scale)
+    {
+        const auto folder=juce::File::getCurrentWorkingDirectory().getChildFile("tmp");folder.createDirectory();
+        juce::FileOutputStream out(folder.getChildFile(name));out.setPosition(0);out.truncate();juce::PNGImageFormat png;
+        require(png.writeImageToStream(c.createComponentSnapshot(c.getLocalBounds(),true,scale),out),"6I preview");
+    };
+    require(display->fxKnobMode()==Mode::immediate && !input->isEnabled() && track->isEnabled(),"defaults or fake INPUT DSP");
+    f.mic(.1f);f.command(0,C::primary);f.render(4096);f.command(0,C::primary);
+    edit->onClick();
+    for(int bank=0;bank<4;++bank)
+    {
+        last();set(0,bank);
+        for(int slot=0;slot<4;++slot)
+        {
+            top->activateInputSlot(slot);first();set(0,5);last();set(2,slot);
+            const int balance=15+bank*20+slot*3;
+            move(input,balance*.01);
+            require(display->inputOscBot(slot).balance==balance && display->fxTarget(Group::input)==slot,"bank/slot target did not write its own OSC");
+            f.render(256);
+            require(f.audio.trackSnapshot(0).frames==4096 && f.audio.trackSnapshot(0).state==LoopTrack::State::playing,"bank/target changed loop");
+        }
+    }
+    for(int bank=0;bank<4;++bank)
+    {
+        last();set(0,bank);
+        require(display->fxTarget(Group::input)==3,"FX TARGET not stored by bank");
+        for(int slot=0;slot<4;++slot) require(display->inputOscBot(slot).balance==15+bank*20+slot*3,"bank/slot values overwritten");
+    }
+    last();set(0,0);set(2,0);
+    // LCD slot selection must not become FX TARGET, or change SINGLE/MULTI/gates.
+    exit->onClick();top->activateInputSlot(0);top->activateInputSlot(1);
+    require(display->inputEnabled(0)&&display->inputEnabled(1),"MULTI setup");
+    edit->onClick();top->activateInputSlot(1);last();set(2,3);
+    move(input,.61);
+    require(display->inputOscBot(3).balance==61 && display->inputOscBot(1).balance==18 && display->inputEnabled(0)&&display->inputEnabled(1),"target changed editing slot, gates or other values");
+    set(1,0);require(!display->inputMulti() && display->inputEnabled(1)&&!display->inputEnabled(0),"SINGLE lost semantics");
+    move(input,.62);require(!display->inputEnabled(3),"performance knob enabled an effect");
+    set(1,1);set(2,0);
+    for(int slot=0;slot<4;++slot) display->updateEffect(Group::input,slot,false);
+    top->publishInputFx();top->activateInputSlot(0);first();
+    // Exact official mappings share LCD storage, including all discrete ROBOT notes.
+    const int types[]={4,5,6,7,8};
+    const int page[]={0,1,1,0,0}, encoder[]={1,2,3,3,1};
+    const char* names[]={"NOTE","BALANCE","E.LEVEL","DEPTH","BALANCE"};
+    for(int i=0;i<5;++i)
+    {
+        first();set(0,types[i]);
+        move(input,.0);move(input,1.0);
+        const auto mapped=display->performanceField(Group::input);
+        require(mapped.name==names[i] && mapped.value==mapped.maximum,"official input mapping wrong");
+        for(int n=0;n<page[i];++n)next->onClick();
+        require(display->getEditorField(encoder[i]).value==mapped.maximum,"large/LCD storage diverged");
+        set(encoder[i],i==0?3:80);
+        require(std::abs(input->effectivePosition()-(i==0?3./11:.8))<1.e-9 && input->getValue()==1,"LCD edit moved physical knob");
+    }
+    // HOOK is shared SETUP state; LCD edits re-arm pickup without moving the physical control.
+    first();set(0,5);next->onClick();move(input,.2);set(2,80);
+    menu->onClick();next->onClick();require(display->getEditorField(0).name=="FX KNOB MODE","SETUP mode missing");set(0,1);
+    screenshot("fx-knob-mode-6i.png",*display,4);
+    require(display->fxKnobMode()==Mode::hook && input->waiting()&&track->waiting(),"shared HOOK mode");
+    int publications=0;
+    const auto publishOsc=top->onInputOscBotChanged;
+    top->onInputOscBotChanged=[&](int slot,OscBotParameters parameters){++publications;publishOsc(slot,parameters);};
+    exit->onClick();move(input,.3);
+    require(publications==0,"unlatched HOOK published DSP parameters");
+    require(display->inputOscBot(0).balance==80 && display->getTitle().contains("HOOK WAIT"),"HOOK premature write/readout");
+    screenshot("fx-knob-hook-6i.png",*display,4);
+    screenshot("fx-knobs-panel-6i.png",panel,1.5f);
+    move(input,.79);require(display->inputOscBot(0).balance==80,"HOOK below crossing");
+    move(input,.81);require(display->inputOscBot(0).balance==81&&!input->waiting(),"HOOK upward crossing failed");
+    move(input,.7);require(display->inputOscBot(0).balance==70,"captured HOOK did not follow");
+    set(2,20);move(input,.3);require(display->inputOscBot(0).balance==20&&input->waiting(),"LCD edit did not re-arm");
+    move(input,.19);require(display->inputOscBot(0).balance==19,"downward capture failed");
+    last();set(2,1);move(input,.25);require(display->inputOscBot(1).balance==18&&input->waiting(),"target change retained pickup");
+    set(0,1);move(input,.3);require(display->inputOscBot(3).balance==44&&input->waiting(),"bank change retained pickup");
+    set(0,0);set(2,0);first();set(0,4);move(input,.4);
+    require(display->inputRobot(0).note==3 && input->waiting(),"type change retained pickup");
+    menu->onClick();next->onClick();set(0,0);exit->onClick();
+    // Mouse wheel is one legal value (one semitone), independent of wheel event amplitude.
+    move(input,0);
+    auto event=[&](juce::Component* c,juce::Point<float> at,juce::Point<float> down,juce::ModifierKeys mods)
+    {return juce::MouseEvent(juce::Desktop::getInstance().getMainMouseSource(),at,mods,1,0,0,0,0,c,c,juce::Time::getCurrentTime(),down,juce::Time::getCurrentTime(),1,false);};
+    juce::MouseWheelDetails wheel{};wheel.deltaY=.2f;
+    for(int note=1;note<=11;++note)
+    {input->mouseWheelMove(event(input,{30,30},{30,30},{}),wheel);require(display->inputRobot(0).note==note,"discrete wheel skipped note");}
+    input->mouseWheelMove(event(input,{30,30},{30,30},{}),wheel);require(display->inputRobot(0).note==11,"wheel exceeded B");
+    first();set(0,5);move(input,.5);
+    const auto down=event(input,{66,66},{66,66},juce::ModifierKeys::leftButtonModifier);
+    input->mouseDown(down);require(display->inputOscBot(0).balance==50,"mouse down jumped");
+    input->mouseDrag(event(input,{66,62},{66,66},juce::ModifierKeys::leftButtonModifier));
+    input->mouseUp(event(input,{66,62},{66,66},{}));
+    require(display->inputOscBot(0).balance>50 && display->inputOscBot(0).balance<=52,"drag not gradual");
+    // Synthetic live input: BALANCE 0 is dry; 100 changes shape, not merely LCD/level.
+    f.stopAll();f.audio.setMonitoringEnabled(true);f.audio.setMonitorVolume(.25f);
+    display->updateEffect(Group::input,0,true);top->publishInputFx();f.mic(.15f);
+    move(input,0);f.render(24000);std::array<float,4096> dry=f.left;
+    move(input,1);f.render(24000);double difference=0,variation=0;
+    for(size_t n=1;n<f.left.size();++n) {difference+=std::abs(f.left[n]-dry[n]);variation+=std::abs(f.left[n]-f.left[n-1]);}
+    require(difference>5 && variation>.1,"INPUT knob did not change waveform in production DSP");
+    // FX SEQUENCE remains running when BALANCE is moved; never writes NOTE or resets phase.
+    first();next->onClick();next->onClick();set(0,1);next->onClick();set(0,102);set(1,2);next->onClick();set(0,60);set(1,67);
+    f.render(200000);const auto q=display->inputSequence(0);const auto manualNote=display->inputOscBot(0).note;
+    require(AudioSystemTestAccess::sequenceNote(f.audio,0)==67,"sequence did not reach second step");
+    move(input,.8);f.render(256);
+    require(AudioSystemTestAccess::sequenceNote(f.audio,0)==67 && display->inputSequence(0).notes==q.notes
+            && display->inputOscBot(0).note==manualNote,"performance knob reset sequence or modified NOTE");
+    // Capture with knob-controlled INPUT processing, replay with INPUT OFF.
+    f.command(2,C::primary);f.render(4096);f.command(2,C::primary);
+    display->updateEffect(Group::input,0,false);top->publishInputFx();f.audio.setMonitoringEnabled(false);f.mic(0);f.render(24000);
+    double replay=0;for(float x:f.left)replay+=std::abs(x);
+    require(replay>.1 && f.audio.trackSnapshot(2).frames==4096,"processed input not recorded");
+    f.command(2,C::primary);f.render(4096);f.command(2,C::primary);f.audio.selectTrack(2);require(f.audio.undoSelectedTrack(),"Undo rejected after performance capture");f.render(256);f.stopAll();
+
+    // Re-record a periodic 6 kHz tone; LPF response must be measurable through actual loop routing.
+    f.command(0,C::clear);for(size_t n=0;n<4096;++n) f.inputL[n]=f.inputR[n]=.15f*std::sin(float(n)*juce::MathConstants<float>::twoPi/8);
+    f.command(0,C::primary);f.render(4096);f.command(0,C::primary);f.mic(0);
+    exit->onClick();trackButtons[0]->onClick();trackEdit->onClick();
+    enter->onClick();set(0,0);set(1,0);screenshot("fx-knob-target-6i.png",*display,4);
+    const auto energy=[&]{double sum=0;for(float x:f.left)sum+=x*x;return sum/f.left.size();};
+    move(track,1);f.render(24000);const auto high=energy();
+    move(track,0);f.render(24000);const auto low=energy();
+    require(high>1.e-4 && low<high*.01,"TRACK knob not connected to LPF audio");
+    display->selectTrack(4);move(track,.3);require(display->getTrackFx().cutoff==30 && display->fxTarget(Group::track)==0 && f.audio.trackFxInsert(0)==0,"track selection rerouted FX target");
+    const auto cutoff=display->getTrackFx().cutoff;
+    set(1,1);require(!track->isEnabled(),"TRACK B silently redirected");set(1,3);require(!track->isEnabled(),"TRACK D silently redirected");
+    set(1,2);move(track,.25);require(display->getTrackFx().drive==25&&display->getTrackFx().cutoff==cutoff,"C knob changed LPF");
+    exit->onClick();exit->onClick(); // Slots select without toggling while editing (6I.1).
+    trackButtons[0]->onClick();trackButtons[2]->onClick();
+    move(track,0);f.render(24000);const auto soft=f.left;
+    move(track,1);f.render(24000);double distDelta=0;for(size_t n=0;n<4096;++n)distDelta+=std::abs(f.left[n]-soft[n]);
+    require(distDelta>1,"TRACK C DRIVE did not change production audio");
+    require(f.audio.trackSnapshot(0).frames==4096,"performance changed loop length");
+    // Concurrent GUI parameter/target/bank publications versus sole audio-thread DSP state.
+    // The worker never touches UI; allocations measured only in the callback.
+    edit->onClick();first();set(0,5);last();
+    std::atomic<bool> finite{true},ready{false};
+    std::thread audioThread([&]
+    {
+        ready=true;
+        for(int block=0;block<1500;++block)
+        {f.render(256);for(int n=0;n<256;++n)if(!std::isfinite(f.left[size_t(n)]))finite=false;}
+    });
+    while(!ready.load()) std::this_thread::yield();
+    for(int n=0;n<300;++n)
+    {set(0,n%4);set(2,(n/4)%4);move(input,(n%101)*.01);move(track,((n+30)%101)*.01);}
+    audioThread.join();require(finite,"concurrent knob updates produced nonfinite audio");
+    std::cout<<"PASS: 6I official mappings, 16 independent INPUT targets, shared IMMEDIATE/HOOK, external-edit pickup, mouse/wheel, LCD/DSP, live OSC waveform, LPF attenuation="<<low/high<<", DIST delta="<<distDelta<<", capture/Undo and concurrent publication\n";
+}
+
+void testStepSlicerIntegration()
+{
+    using C=LoopTrack::Command;
+    for(double rate:{44100.,48000.})
+    {
+        FiveTracks f(rate);f.audio.setBpm(165);f.mic(.1f);
+        f.audio.setMonitoringEnabled(true);f.audio.setMonitorVolume(.25f);
+        OscBotParameters osc;osc.enabled=true;osc.balance=100;osc.note=60;
+        f.audio.setInputOscBot(0,osc);osc.note=72;f.audio.setInputOscBot(1,osc);
+        FxSequenceParameters seq;seq.enabled=true;seq.rate=102;seq.maximum=9;
+        seq.notes={60,58,61,65,63,65,68,67,70,36,36,36,36,36,36,36};f.audio.setInputSequence(0,seq);
+        seq.maximum=6;seq.notes={80,79,82,80,82,85,36,36,36,36,36,36,36,36,36,36};f.audio.setInputSequence(1,seq);
+        StepSlicerParameters p;p.enabled=true;p.rate=112;p.depth=50;p.threshold=-15;
+        f.audio.setInputStepSlicer(2,p);
+        ReverbParameters reverb;reverb.enabled=true;reverb.preDelay=0;reverb.eLevel=64;reverb.density=4;
+        f.audio.setInputReverb(3,reverb);f.audio.setInputActivation(15,0,3,true,0,4);
+        f.render(48000);
+        for(int i=0;i<5;++i) f.command(i,C::primary);
+        f.render(4096);const auto capturedL=f.left,capturedR=f.right;
+        double energy=0;for(float v:capturedL)energy+=v*v;require(energy>1.e-5,"four-FX chain silent");
+        for(int i=0;i<5;++i) f.command(i,C::primary);
+        f.stopAll(); f.audio.setMonitoringEnabled(false);
+        reverb.enabled=false;f.audio.setInputReverb(3,reverb);f.audio.setInputActivation(0,0,3,false,0,4);f.mic(0);f.render(4096);
+        for(int track=0;track<5;++track)
+        {
+            f.command(track,C::primary);f.render(8192);
+            for(int n=512;n<3800;++n)
+                require(std::abs(f.left[size_t(n)]-4*capturedL[size_t(n)])<2.e-5f &&
+                        std::abs(f.right[size_t(n)]-4*capturedR[size_t(n)])<2.e-5f,"SLICER/REVERB not captured exactly or re-applied during playback");
+            f.command(track,C::primary);f.mic(.1f);f.audio.setInputActivation(7,0,3,false,0,4);f.render(8192);
+            f.command(track,C::primary);f.command(track,C::undo);
+            f.command(track,C::stop);f.mic(0);f.audio.setInputActivation(0,0,3,false,0,4);
+            f.command(track,C::primary);f.render(8192);
+            for(int n=512;n<3800;++n) require(std::abs(f.left[size_t(n)]-4*capturedL[size_t(n)])<2.e-5f,"SLICER overdub Undo failed");
+            f.command(track,C::stop);
+        }
+        f.playAll(); f.audio.setMonitoringEnabled(true); f.mic(.1f);
+        f.audio.setInputActivation(15,0,3,true,0,4); reverb.enabled=true;f.audio.setInputReverb(3,reverb);
+        TrackFxParameters trackFx;trackFx.enabled=true;trackFx.distortionEnabled=true;
+        f.audio.setTrackEffects(trackFx);f.render(8192);
+        std::array<double,200> timings{};double total=0;
+        for(auto& t:timings)
+        {
+            const auto start=std::chrono::steady_clock::now();f.render(256);
+            t=std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-start).count();total+=t;
+            for(int n=0;n<256;++n) require(std::isfinite(f.left[size_t(n)])&&std::abs(f.left[size_t(n)])<.98f,"unsafe loaded mix");
+        }
+        std::sort(timings.begin(),timings.end());
+        std::cout<<"STEP SLICER + 2 OSC/SEQ + REVERB + 5 loops + TRACK FX rate="<<rate<<" meanMs="<<total/200<<" p99Ms="<<timings[197]<<" maxMs="<<timings.back()<<" deadlineMs="<<256000/rate<<'\n';
+        f.stopAll();f.audio.setInputActivation(8,0,3,false,0,4);f.mic(0);f.render(2048);
+        double tail=0;for(int n=1000;n<2048;++n)tail+=double(f.left[size_t(n)])*f.left[size_t(n)];
+        require(tail>1.e-10,"D reverb tail cut when sources/slicer disabled");
+    }
+    // Distinguish real rhythmic changes from LCD-only state; each bank/slot is independent.
+    FiveTracks f;f.mic(.2f);f.audio.setMonitoringEnabled(true);f.audio.setMonitorVolume(.25f);
+    StepSlicerParameters p;p.enabled=true;p.depth=100;p.threshold=0;p.gain=0;p.rate=100;p.maximum=2;p.level[1]=0;
+    for(int bank=0;bank<4;++bank) for(int slot=0;slot<4;++slot)
+    {
+        f.audio.setInputStepSlicer(slot,p,bank);f.audio.setInputActivation(1u<<slot,0,0,false,bank,1u<<slot);f.render(8192);
+        double low=1,high=0;for(float v:f.left){low=std::min(low,double(v));high=std::max(high,double(v));}
+        require(low==0 && high>.049,"bank/slot slicer not routed");
+    }
+    f.audio.setInputActivation(8,0,0,false,0,8);f.render(2048);
+    const double old=AudioSystemTestAccess::slicerPosition(f.audio,3,3);f.render(1024);
+    require(AudioSystemTestAccess::slicerPosition(f.audio,3,3)==old,"inactive bank advanced");
+    f.audio.setInputActivation(0,0,0,false,0,8);f.render(4096);f.near(.05f,"SLICER bypass not original microphone");
+    std::cout<<"PASS: STEP SLICER four-FX chain, capture/playback/overdub/Undo five tracks, tails, all banks/slots and callback routing\n";
+}
+
+void testG2BIntegration()
+{
+    using C=LoopTrack::Command;
+    for(double rate:{44100.,48000.})
+    {
+        FiveTracks f(rate);f.audio.setBpm(165);
+        f.audio.setMonitoringEnabled(true);f.audio.setMonitorVolume(1.f);
+        for(int n=0;n<4096;++n){const float v=float(.3*std::sin(6.283185307179586*220.*n/rate));f.inputL[size_t(n)]=v;f.inputR[size_t(n)]=v;}
+        // Bank B slot A is the We Drive Alone layer: G2B, MODE 2, BALANCE 100. Bank A keeps OSC BOT.
+        G2BParameters g;g.enabled=true;g.balance=100;g.mode=2;
+        OscBotParameters osc;osc.enabled=true;osc.balance=100;osc.note=60;f.audio.setInputOscBot(0,osc,0);
+        f.audio.setInputG2B(0,g,1);
+        auto energy=[&](int from,int to){double e=0;for(int n=from;n<to;++n)e+=double(f.left[size_t(n)])*f.left[size_t(n)];return e;};
+        auto lowRatio=[&](){const double w=6.283185307179586;double a=0,b=0,c=0,d=0;for(int n=1000;n<4096;++n){const double x=f.left[size_t(n)];a+=x*std::cos(w*110*n/rate);b+=x*std::sin(w*110*n/rate);c+=x*std::cos(w*220*n/rate);d+=x*std::sin(w*220*n/rate);}return std::sqrt(a*a+b*b)/std::max(1.e-9,std::sqrt(c*c+d*d));};
+        f.audio.setInputActivation(0,0,0,false,1,0,0);f.render(48000);f.render(4096);
+        const double offRatio=lowRatio();require(offRatio<.1,"G2B off still has 110 Hz");
+        f.audio.setInputActivation(1,0,0,false,1,0,1);f.render(48000);f.render(4096);
+        const double onRatio=lowRatio();require(onRatio>5,"G2B on did not move 220 Hz down");
+        require(energy(1000,4096)>1.e-3,"G2B silent");
+        // Record the G2B layer on all five tracks, then play back with G2B off: it is baked in, not retroactive.
+        for(int track=0;track<5;++track)
+        {
+            f.audio.setInputActivation(1,0,0,false,1,0,1);f.render(4096);
+            f.command(track,C::primary);f.render(24000);f.command(track,C::primary);
+            f.audio.setMonitoringEnabled(false);f.audio.setInputActivation(0,0,0,false,1,0,0);f.render(4096);
+            f.render(8192);require(energy(1000,4096)>1.e-4,"G2B layer not recorded on track");
+            f.command(track,C::stop);f.audio.setMonitoringEnabled(true);
+        }
+        // Existing banks are untouched: bank A still produces the OSC BOT type, bank B has no OSC BOT.
+        f.audio.setInputActivation(1,0,1,false,0,0,0);f.render(8192);require(energy(1000,4096)>1.e-4,"bank A OSC BOT lost");
+        std::cout<<"G2B integration rate="<<rate<<" 110/220 off="<<offRatio<<" on="<<onRatio<<'\n';
+    }
+    std::cout<<"PASS: G2B INPUT FX recorded on five tracks, banks preserved, not applied retroactively\n";
+}
+
+
+// Deterministic transport measurement: unique stereo samples cross arbitrary
+// callback and 256-frame scratch boundaries. Compare every playback sample,
+// including the documented non-destructive edge/transport ramps.
+void testCaptureAlignment6H4()
+{
+    using C=LoopTrack::Command;
+    for(double rate:{44100.,48000.}) for(int block:{17,257,1024}) for(bool wet:{false,true})
+    {
+        FiveTracks f(rate); f.audio.setMonitoringEnabled(true); f.audio.setMonitorVolume(.25f);
+        G2BParameters g;g.enabled=true;g.balance=100;g.mode=2;
+        f.audio.setInputG2B(2,g,2);f.audio.setInputActivation(wet?4u:0u,0,0,false,2,0,4);
+        f.render(4096);
+        constexpr int length=10007;
+        std::array<std::vector<float>,2> recorded {std::vector<float>(length),std::vector<float>(length)};
+        for(int t=0;t<5;++t) f.command(t,C::primary);
+        for(int offset=0;offset<length;)
+        {
+            const int n=std::min(block,length-offset);
+            for(int j=0;j<n;++j)
+            {
+                const double time=(offset+j)/rate;
+                f.inputL[size_t(j)]=float(.12*std::sin(6.283185307179586*(147*time+30*time*time)));
+                f.inputR[size_t(j)]=float(.07*std::cos(6.283185307179586*(191*time+13*time*time)));
+            }
+            f.render(n);
+            for(int j=0;j<n;++j)
+            {
+                recorded[0][size_t(offset+j)]=4*f.left[size_t(j)];recorded[1][size_t(offset+j)]=4*f.right[size_t(j)];
+                if(!wet) require(std::abs(4*f.left[size_t(j)]-f.inputL[size_t(j)])<1.e-7f
+                                 &&std::abs(4*f.right[size_t(j)]-f.inputR[size_t(j)])<1.e-7f,"dry monitor duplicates/delays input");
+            }
+            offset+=n;
+        }
+        for(int t=0;t<5;++t) {f.command(t,C::primary);require(f.audio.trackSnapshot(t).frames==length,"capture duration changed");}
+        f.stopAll();f.audio.setMonitoringEnabled(false);f.audio.setInputActivation(0,0,0,false,2,0,4);f.mic(0);f.render(4096);
+        for(int t=0;t<5;++t)
+        {
+            f.command(t,C::primary);
+            for(int offset=0;offset<2*length;)
+            {
+                const int n=std::min(block,2*length-offset);f.render(n);
+                for(int j=0;j<n;++j)
+                {
+                    const int total=offset+j,index=total%length;
+                    const float edge=std::min(1.f,float(std::min(index,length-1-index))/float(juce::roundToInt(.003*rate)));
+                    // JUCE SmoothedValue uses floor for ramp sample counts.
+                    const float fade=std::min(1.f,float(total+1)/float(int(.005*rate)));
+                    require(std::abs(f.left[size_t(j)]-recorded[0][size_t(index)]*edge*fade)<2.e-5f
+                            &&std::abs(f.right[size_t(j)]-recorded[1][size_t(index)]*edge*fade)<2.e-5f,
+                            "capture/playback sample mismatch, extra delay, missing/duplicated samples or dry/wet duplication");
+                }
+                offset+=n;
+            }
+            require(f.audio.trackSnapshot(t).progress<1.e-6f,"loop drift after two repetitions");
+            f.command(t,C::stop);f.render(512);
+        }
+    }
+    FiveTracks f;f.audio.setMonitoringEnabled(true);f.audio.setMonitorVolume(.25f);
+    for(int n=0;n<4096;++n) f.inputL[size_t(n)]=f.inputR[size_t(n)]=float(.2*std::sin(6.283185307179586*220*n/48000));
+    for(int bank=0;bank<4;++bank) for(int slot=0;slot<4;++slot)
+    {
+        G2BParameters g;g.enabled=true;g.balance=100;g.mode=2;f.audio.setInputG2B(slot,g,bank);
+        f.audio.setInputActivation(1u<<slot,0,0,false,bank,0,1u<<slot);f.render(24000);f.render(4096);
+        double difference=0,energy=0;
+        for(int n=1000;n<4000;++n){const double y=4*f.left[size_t(n)];difference+=std::pow(y-f.inputL[size_t(n)],2);energy+=y*y;}
+        require(energy>.1&&difference>energy*.5,"G2B bank/slot not processing");
+        f.audio.setInputActivation(0,0,0,false,bank,0,1u<<slot);f.render(4096);
+        for(int n=1000;n<4000;++n) require(std::abs(4*f.left[size_t(n)]-f.inputL[size_t(n)])<1.e-6f,"G2B OFF not dry in bank/slot");
+    }
+    std::cout<<"PASS 6H4: exact stereo capture/playback 10007 frames, 2 wraps, 5 tracks, dry/G2B, 44.1/48k, blocks 17/257/1024; G2B all 16 bank/slot routes\n";
+}
+
+
+void testIndicators6H4()
+{
+    using S=LoopTrack::State;using C=LoopTrack::Command;using M=IndicatorMode;
+    TrackIndicatorReading reading;
+    for(auto mode:{M::status,M::loopPosition,M::level}) require(indicatorFill(mode,reading,1)==0,"empty indicator");
+    reading.transport={S::recording,123,false,0,false,false};
+    require(indicatorFill(M::status,reading,4.1)==1 && indicatorFill(M::status,reading,4.6)==0,"REC status tempo pulse");
+    require(indicatorFill(M::loopPosition,reading,4.1)==0 && indicatorFill(M::level,reading,4.1)==0,"initial REC invented progress/level");
+    reading.transport={S::stopped,123,false,0,false,false};
+    require(indicatorFill(M::status,reading,4.1)==1 && indicatorFill(M::loopPosition,reading,4.1)==0,"STOP indicator modes");
+    reading.transport.state=S::overdubbing;reading.transport.progress=.75f;reading.level={.1f,.05f};
+    require(indicatorFill(M::loopPosition,reading,4.1)==.75f && indicatorFill(M::status,reading,4.6)==0,"DUB actual progress/tempo pulse");
+    reading.transport.state=S::playing;
+    require(indicatorFill(M::status,reading,5)==.25f,"STATUS is one measure, not loop fraction");
+    require(indicatorFill(M::level,reading,5)>.6f,"LEVEL amplitude mapping");
+
+    FiveTracks f(48000,600000);
+    const std::array<int,5> lengths{144000,288000,576000,192000,96000}; // 3,6,12,4,2 seconds.
+    const std::array<float,5> amplitudes{.30f,.03f,0.f,.10f,.05f};
+    TrackIndicatorFrame frame;
+    const auto snapshot=[&]() { require(f.audio.readIndicators(frame),"uncontended snapshot unavailable"); };
+    for(int t=0;t<5;++t)
+    {
+        f.mic(amplitudes[size_t(t)]);f.command(t,C::primary);f.render(lengths[size_t(t)]);
+        snapshot();require(frame.tracks[size_t(t)].transport.state==S::recording,"REC publication");
+        f.command(t,C::primary);f.command(t,C::stop);f.render(512);
+        snapshot();require(frame.tracks[size_t(t)].transport.frames==lengths[size_t(t)]&&frame.tracks[size_t(t)].transport.state==S::stopped,"stopped phrase publication");
+    }
+    f.mic(0);f.playAll();f.render(72000);snapshot();
+    for(size_t t=0;t<5;++t)
+    {
+        require(std::abs(frame.tracks[t].transport.progress-72000.f/lengths[t])<2.e-6f,"3/6/12 second independent progress");
+        require(std::abs(frame.tracks[t].level[0]-amplitudes[t])<1.e-5f,"track meter cross-talk or gain mismatch");
+        require(frame.tracks[t].transport.state==S::playing,"simultaneous PLAY state");
+    }
+    require(indicatorFill(M::level,frame.tracks[0],frame.beats)>indicatorFill(M::level,frame.tracks[1],frame.beats)
+            &&indicatorFill(M::level,frame.tracks[2],frame.beats)==0,"strong/weak/silent LEVEL");
+    require(std::abs(frame.beats-f.audio.musicalPosition().beats)<1.e-10,"snapshot clock not callback clock");
+    f.audio.setBpm(90);f.render(12345);snapshot();
+    for(size_t t=0;t<5;++t) require(std::abs(frame.tracks[t].transport.progress-84345.f/lengths[t])<2.e-6f,"BPM changed loop indicator speed");
+    f.audio.setTrackVolume(0,0);f.render(48000);snapshot();
+    require(frame.tracks[0].level[0]<.001f &&frame.tracks[1].level[0]>.029f,"fader level release or independent meters");
+    f.command(1,C::primary);snapshot();require(frame.tracks[1].transport.state==S::overdubbing,"DUB snapshot");
+    const auto position=frame.tracks[1].transport.progress;
+    f.render(1024);f.command(1,C::primary);f.command(1,C::undo);snapshot();
+    require(frame.tracks[1].transport.state==S::playing && frame.tracks[1].transport.progress>position,"DUB/Undo cursor discontinuity");
+    f.command(1,C::stop);snapshot();
+    require(frame.tracks[1].transport.progress==0&&frame.tracks[1].level[0]==0,"STOP retains fictitious movement/level");
+    f.command(1,C::clear);snapshot();require(frame.tracks[1].transport.state==S::empty&&frame.tracks[1].transport.frames==0,"clear snapshot");
+    f.stopAll();f.command(0,C::primary);f.render(lengths[0]);snapshot();require(frame.tracks[0].transport.progress<1.e-6f,"LED wrap not actual loop wrap");
+
+    // UI route and return page: knob must not modify hidden FX or tempo.
+    MainComponent panel(f.audio);TopPanelComponent* top=nullptr;MemoryDisplay* display=nullptr;
+    juce::Button *menu=nullptr,*exit=nullptr,*inputEdit=nullptr;ParameterKnob* first=nullptr;
+    for(auto* child:panel.getChildren()) if(auto* candidate=dynamic_cast<TopPanelComponent*>(child)) top=candidate;
+    for(auto* child:top->getChildren())
+    {
+        if(auto* d=dynamic_cast<MemoryDisplay*>(child)) display=d;
+        if(auto* k=dynamic_cast<ParameterKnob*>(child)) if(k->getName()=="Parameter knob 1") first=k;
+        if(auto* b=dynamic_cast<juce::Button*>(child))
+        {if(b->getButtonText()=="MENU") menu=b;if(b->getButtonText()=="EXIT") exit=b;if(b->getTitle()=="INPUT FX EDIT") inputEdit=b;}
+    }
+    require(menu&&exit&&first&&display&&inputEdit,"indicator UI controls missing");
+    inputEdit->onClick();const auto previous=display->getEditorField(0).value;
+    menu->onClick();require(display->isIndicatorEditing()&&first->isEnabled(),"MENU did not open INDICATOR");
+    for(int mode=0;mode<3;++mode)
+    {first->setValue(mode,juce::sendNotificationSync);require(int(top->indicatorMode())==mode,"indicator encoder");}
+    first->setValue(1,juce::sendNotificationSync);
+    const auto folder=juce::File::getCurrentWorkingDirectory().getChildFile("tmp");folder.createDirectory();
+    {juce::FileOutputStream out(folder.getChildFile("indicator-lcd-6h4.png"));out.setPosition(0);out.truncate();juce::PNGImageFormat png;
+     require(png.writeImageToStream(display->createComponentSnapshot(display->getLocalBounds(),true,4),out),"indicator LCD preview");}
+    exit->onClick();require(!display->isIndicatorEditing()&&display->isInputEditing()&&display->getEditorField(0).value==previous,"indicator EXIT lost editor or changed type");
+    exit->onClick();f.audio.setTrackVolume(0,1);f.playAll();f.render(30000);
+    // Timer copies the last audio publication; it cannot advance it without audio.
+    juce::Thread::sleep(40);juce::Timer::callPendingTimersSynchronously();snapshot();
+    std::array<float,5> fills{};size_t index=0;
+    for(auto* child:panel.getChildren()) if(auto* track=dynamic_cast<TrackComponent*>(child))
+        for(auto* button:track->getChildren()) if(auto* ring=dynamic_cast<LedRingButton*>(button))
+        {fills[index]=ring->getIndicatorFill();require(std::abs(fills[index]-indicatorFill(M::loopPosition,frame.tracks[index],frame.beats))<1.e-6f,"ring did not use audio snapshot");++index;}
+    require(index==5,"five rings missing");
+    {juce::FileOutputStream out(folder.getChildFile("indicators-panel-6h4.png"));out.setPosition(0);out.truncate();juce::PNGImageFormat png;
+     require(png.writeImageToStream(panel.createComponentSnapshot(panel.getLocalBounds(),true,1.5f),out),"indicator panel preview");}
+
+
+    // Quantized end and synchronized start remain audio boundaries, including a
+    // boundary reached in the middle of a driver callback.
+    {
+        FiveTracks q; q.mic(.1f);q.audio.setBpm(120);q.audio.setQuantizeEnabled(true);
+        q.command(0,C::primary);q.render(12000);q.command(0,C::primary);
+        TrackIndicatorFrame value;require(q.audio.readIndicators(value),"Q snapshot");
+        require(value.tracks[0].transport.state==S::recording && value.tracks[0].transport.awaitingBoundary
+                &&indicatorFill(M::loopPosition,value.tracks[0],value.beats)==0,"pending Q indicator prematurely PLAY");
+        q.render(84000+513);q.audio.readIndicators(value);
+        require(value.tracks[0].transport.frames==96000&&std::abs(value.tracks[0].transport.progress-513.f/96000)<1.e-6f,"quantized mid-block LED phase");
+        q.command(0,C::stop);q.command(0,C::clear);q.audio.setAllLoopSync(true);
+        q.command(0,C::primary);q.render(240000);q.command(0,C::primary);q.render(192000);q.audio.readIndicators(value);
+        const auto live=q.audio.trackSnapshot(0);
+        require(value.tracks[0].transport.state==S::playing&&value.tracks[0].transport.frames==live.frames
+                &&value.tracks[0].transport.progress==live.progress,"LOOP SYNC indicator disagrees with actual cursor");
+    }
+    // Meter includes individual insert but not another track's signal or the ALL sum.
+    {
+        TrackFxRouting routing;TrackFxParameters p;p.enabled=true;p.cutoff=0;p.resonance=0;
+        routing.setParameters(p);routing.prepare(48000);routing.beginBlock();
+        std::array<float,5> gains{1,1,1,1,1};std::array<std::array<float,2>,5> measured{};
+        double filtered=0,clean=0;
+        for(int n=0;n<4800;++n)
+        {
+            const float x=float(.1*std::sin(6.283185307179586*5000*n/48000));
+            std::array<float,5> input{x,x,0,0,0};float l=0,r=0;
+            routing.processFrame(input,input,l,r,gains,&measured);
+            if(n>2400){filtered+=measured[0][0];clean+=measured[1][0];}
+            require(measured[2][0]==0,"meter copied common bus into silent track");
+        }
+        require(filtered<clean*.2,"meter ignores individual LPF insert");
+    }
+    // Independent reader/writer stress: every field encodes the same generation.
+    TrackIndicatorMailbox mailbox;std::atomic<bool> done{false};std::atomic<int> accepted{0};std::atomic<bool> coherent{true};
+    std::thread reader([&]
+    {
+        TrackIndicatorFrame value;
+        while(!done.load()) if(mailbox.read(value))
+        {
+            const int n=int(value.beats);const float level=float(n%100)/100.f;
+            for(const auto& track:value.tracks)
+                if(track.transport.frames!=n||track.level[0]!=level||track.level[1]!=level||track.transport.progress!=level) coherent=false;
+            ++accepted;
+        }
+    });
+    for(int n=1;n<=50000;++n)
+    {
+        TrackIndicatorFrame value;value.beats=n;
+        for(auto& track:value.tracks){track.transport.frames=n;track.transport.progress=float(n%100)/100.f;track.level.fill(track.transport.progress);}
+        mailbox.publish(value);
+    }
+    done=true;reader.join();require(coherent&&accepted>0,"torn concurrent indicator publication");
+    std::cout<<"PASS 6H4: STATUS/LOOP POSITION/LEVEL, 3/6/12 s and five actual loops, independent levels, silence/fader, STOP/clear/DUB/Undo/wrap/BPM, MENU/EXIT/rings and coherent atomic snapshots ("<<accepted<<" reads)\n";
+}
+
+void testStepSlicerPanel()
+{
+    FiveTracks f;MainComponent panel(f.audio);TopPanelComponent* top=nullptr;MemoryDisplay* display=nullptr;
+    for(auto* c:panel.getChildren()) if(auto* t=dynamic_cast<TopPanelComponent*>(c))top=t;
+    std::array<ParameterKnob*,4> knobs{};juce::Button *edit=nullptr,*next=nullptr,*exit=nullptr;
+    for(auto* c:top->getChildren())
+    {
+        if(auto* d=dynamic_cast<MemoryDisplay*>(c))display=d;
+        if(auto* k=dynamic_cast<ParameterKnob*>(c)) for(int i=0;i<4;++i)if(k->getName()=="Parameter knob "+juce::String(i+1))knobs[size_t(i)]=k;
+        if(auto* b=dynamic_cast<juce::Button*>(c))
+        {if(b->getTitle()=="INPUT FX EDIT")edit=b;if(b->getButtonText()=="Next")next=b;if(b->getButtonText()=="EXIT")exit=b;}
+    }
+    require(top&&display&&edit&&next&&exit&&knobs[3],"SLICER panel controls missing");
+    panel.setSize(1200,660);
+    const auto preview=[&](const char* name)
+    {
+        auto file=juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile(name);
+        juce::FileOutputStream stream(file);stream.setPosition(0);stream.truncate();juce::PNGImageFormat png;
+        require(png.writeImageToStream(display->createComponentSnapshot(display->getLocalBounds(),true,4),stream),"SLICER LCD render");
+    };
+    edit->onClick();top->activateInputSlot(2);knobs[0]->setValue(7,juce::sendNotificationSync); // Real knob callbacks -> AudioSystem.
+    require(display->getEditorField(1).name=="RATE","SLICER controls not refreshed");
+    knobs[1]->setValue(112,juce::sendNotificationSync);knobs[2]->setValue(9,juce::sendNotificationSync);knobs[3]->setValue(50,juce::sendNotificationSync);
+    preview("mk2-step-slicer-general.png");
+    next->onClick();knobs[0]->setValue(-15,juce::sendNotificationSync);knobs[1]->setValue(6,juce::sendNotificationSync);
+    next->onClick();knobs[0]->setValue(25,juce::sendNotificationSync);knobs[1]->setValue(0,juce::sendNotificationSync);
+    preview("mk2-step-slicer-steps.png");
+    const auto saved=display->inputStepSlicer(2);require(saved.rate==112&&saved.maximum==9&&saved.threshold==-15&&saved.length[0]==25&&saved.level[0]==0,"encoder editing failed");
+    for(int i=0;i<8;++i)next->onClick();require(display->getEditorField(0).name=="BANK","BANK page inaccessible");
+    preview("mk2-step-slicer-bank.png");
+    knobs[0]->setValue(1,juce::sendNotificationSync);require(display->inputBank()==1,"BANK encoder failed");f.render(2048);
+    require(AudioSystemTestAccess::currentBank(f.audio)==1,"LCD BANK not connected to audio");
+    knobs[0]->setValue(0,juce::sendNotificationSync);f.render(2048);require(display->inputStepSlicer(2).length[0]==25,"bank A settings lost");
+    exit->onClick();top->activateInputSlot(2);f.render(256);
+    require(display->inputEnabled(2) && ((AudioSystemTestAccess::consumedInput(f.audio)>>16)&4),"C gate not published");
+    edit->onClick();top->activateInputSlot(3);require(display->inputEnabled(2),"edit selection toggled effect");exit->onClick();
+    std::cout<<"PASS: STEP SLICER LCD encoders, BANK selector, EXIT and slot gates\n";
+}
 
 void testFiveTracks()
 {
@@ -1622,6 +2356,27 @@ int main(int argc, char** argv)
     juce::ScopedJuceInitialiser_GUI juce;
     try
     {
+        if(argc>1 && std::string(argv[1])=="--fx-banks")
+        {testFxBanks6I1();return 0;}
+        if(argc>1 && std::string(argv[1])=="--fx-knobs")
+        {
+#if defined(_MSC_VER) && defined(_DEBUG)
+            const auto old=_CrtSetAllocHook(fiveTrackAllocationHook);
+#endif
+            testFxKnobs6I();
+#if defined(_MSC_VER) && defined(_DEBUG)
+            _CrtSetAllocHook(old);
+#endif
+            require(fiveTrackAllocations==0,"6I callback allocation");return 0;
+        }
+        if(argc>1 && std::string(argv[1])=="--indicators-6h4")
+        {testIndicators6H4();return 0;}
+        if(argc>1 && std::string(argv[1])=="--recording-6h4")
+        {testCaptureAlignment6H4();testMeasureSync();testSyncDriftAndRates();testQuantizeIntegration();runLoopTrackTests();return 0;}
+        if(argc>1 && std::string(argv[1])=="--g2b")
+        {runG2BEffectTests();testG2BIntegration();return 0;}
+        if(argc>1 && std::string(argv[1])=="--step-slicer")
+        {runStepSlicerEffectTests();testStepSlicerIntegration();testStepSlicerPanel();return 0;}
         if (argc > 1 && std::string(argv[1]) == "--input-fx-shortcuts")
         { testInputFxShortcuts(); testInputFxGroupAudio(); return 0; }
         if (argc > 1 && std::string(argv[1]) == "--fx-sequence")
@@ -1637,6 +2392,8 @@ int main(int argc, char** argv)
         { testOscBotPanel(); return 0; }
         runOscBotEffectTests();
         runReverbEffectTests();
+        runStepSlicerEffectTests();
+        runG2BEffectTests();
         runRobotQualityTests(true);
     }
     catch (const std::exception& e) { std::cerr << "FAIL: " << e.what() << '\n'; return 1; }
@@ -1647,8 +2404,12 @@ int main(int argc, char** argv)
 #if defined(_MSC_VER) && defined(_DEBUG)
         const auto previous = _CrtSetAllocHook(fiveTrackAllocationHook);
 #endif
+        testFxBanks6I1();testFxKnobs6I();testIndicators6H4();testCaptureAlignment6H4();
+        testStepSlicerIntegration();testStepSlicerPanel();testInputFxShortcuts();testInputFxGroupAudio();
+        testFxSequenceIntegration();testSequenceSyncTransport();testFxSequencePanel();
+        testG2BIntegration();
         testFiveTracks(); testFiveQuantizedTracksAndMix(); testTrackPanelRouting(); testSharedTrackFxRouting(); testInputRobotIntegration(); testInputRobotPanel(); testRobotCallbackBudget();
-        testOscBotInputIntegration(); testOscBotPanel(); testFxSequenceIntegration(); testInputFxShortcuts(); testInputFxGroupAudio(); testSequenceSyncTransport(); testFxSequencePanel(); testOscBotCallbackBudget();
+        testOscBotInputIntegration();
         testMeasureSync(); testSyncDriftAndRates(); testSyncLifecycleLimits();
 #if defined(_MSC_VER) && defined(_DEBUG)
         _CrtSetAllocHook(previous);

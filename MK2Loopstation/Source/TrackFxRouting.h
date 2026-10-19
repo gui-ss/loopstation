@@ -46,16 +46,18 @@ public:
         for (int i = 0; i < 5; ++i) gates[size_t(i)].setTargetValue((enabled & (1u << unsigned(i))) ? 1.f : 0.f);
     }
     void processFrame(const std::array<float, 5>& inputL, const std::array<float, 5>& inputR,
-                      float& left, float& right, const std::array<float, 5>& gains) noexcept
+                      float& left, float& right, const std::array<float, 5>& gains,
+                      std::array<std::array<float,2>,5>* meters=nullptr) noexcept
     {
         if (! routeGain.isSmoothing() && routeGain.getCurrentValue() == 0 && current != requested)
         { current = requested; effects.reset(); routeGain.setTargetValue(1); }
         const float route = routeGain.getNextValue();
-        std::array<float, 5> l {}, r {};
+        std::array<float, 5> l {}, r {}, gateValues {};
         float dryL = 0, dryR = 0, bypassL = 0, bypassR = 0;
         for (size_t i = 0; i < l.size(); ++i)
         {
             const float gate = gates[i].getNextValue();
+            gateValues[i]=gate;
             dryL += inputL[i] * gains[i]; dryR += inputR[i] * gains[i];
             bypassL += inputL[i] * (1 - gate) * gains[i]; bypassR += inputR[i] * (1 - gate) * gains[i];
             l[i] = inputL[i] * gate; r[i] = inputR[i] * gate;
@@ -67,6 +69,13 @@ public:
         if (c != 0) effects.processDistortion(l[size_t(c - 1)], r[size_t(c - 1)]);
         float busL = 0, busR = 0;
         for (size_t i = 0; i < l.size(); ++i) { busL += l[i] * gains[i]; busR += r[i] * gains[i]; }
+        // Observe contributions without changing the mix or duplicating shared FX.
+        // ALL is nonlinear processing of a sum, so it cannot be attributed per track.
+        if(meters) for(size_t i=0;i<5;++i)
+        {
+            (*meters)[i][0]=std::abs(gains[i]*(inputL[i]+route*(l[i]-inputL[i]*gateValues[i])));
+            (*meters)[i][1]=std::abs(gains[i]*(inputR[i]+route*(r[i]-inputR[i]*gateValues[i])));
+        }
         if (a == 0) effects.processLpf(busL, busR);
         if (c == 0) effects.processDistortion(busL, busR);
         left = dryL + route * (bypassL + busL - dryL);

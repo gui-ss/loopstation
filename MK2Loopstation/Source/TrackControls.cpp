@@ -140,17 +140,18 @@ void LedRingButton::paintButton(juce::Graphics& g, bool, bool down)
     g.setColour(juce::Colour(0xff3b3d43));
     g.strokePath(arc(83.0f, 144.0f, 225.0f), juce::PathStrokeType(1.0f));
 
-    // Both diffusers follow the supplied transport state.
-    const auto outerRing = arc(69.5f, 220.0f, 500.0f);
-    VisualStyle::ledStroke(g, outerRing, 10.0f, colour, lit);
-    // Subtle diffuser segments, rather than a perfectly flat luminous stroke.
-    for (int angle = 227; angle < 495; angle += 9)
+    // Outer red indicator follows the audio snapshot. The inner button retains
+    // the independent REC/PLAY/DUB colours already used by the panel.
+    constexpr int segments=32;
+    const int illuminated=indicator<=0 ? 0 : std::min(segments,int(std::ceil(indicator*segments)));
+    for(int i=0;i<segments;++i)
     {
-        g.setColour(juce::Colours::black.withAlpha(0.08f));
-        g.strokePath(arc(69.5f, static_cast<float>(angle), angle + 0.65f), juce::PathStrokeType(9.0f));
+        const float start=220.f+i*(280.f/segments);
+        VisualStyle::ledStroke(g,arc(69.5f,start+.45f,start+280.f/segments-.45f),10.f,
+                              juce::Colour(0xffff354f),i<illuminated);
     }
-    g.setColour(colour.interpolatedWith(juce::Colours::white, 0.5f).withAlpha(0.5f));
-    g.strokePath(arc(73.5f, 228.0f, 491.0f), juce::PathStrokeType(0.8f));
+    g.setColour(juce::Colour(0xff878a95).withAlpha(.25f));
+    g.strokePath(arc(73.5f,228.f,491.f),juce::PathStrokeType(.8f));
     g.setColour(juce::Colour(0xff080a0c));
     g.fillEllipse(bounds.reduced(29.0f));
     g.setColour(juce::Colour(0xff252a2e));
